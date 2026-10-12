@@ -1,0 +1,16 @@
+# Entorno virtual y caché de Python
+.venv/
+__pycache__/
+*.pyc
+
+# Librería nativa compilada (se genera con native/build_*)
+native/*.dll
+native/*.so
+native/*.dylib
+
+# Audios de prueba y temporales (pesados y con derechos de autor)
+*.wav
+*.mp3
+
+# Registro local de la sesión
+registro.log

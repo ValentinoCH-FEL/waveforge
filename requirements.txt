@@ -1,0 +1,12 @@
+numpy
+matplotlib
+sounddevice
+yt-dlp
+soundfile
+
+# Separación con IA (Demucs + modelo karaoke para voz principal/coros)
+torch
+demucs-infer
+audio-separator
+onnxruntime
+librosa
