@@ -245,7 +245,7 @@ class AppEstudioAudio:
         if not ruta:
             return
 
-        if ruta.lower().endswith(".wav"):
+        if audio_io.es_wav_nativo(ruta):
             self._cargar_ruta_wav(ruta, ruta_original=ruta)
             return
 
