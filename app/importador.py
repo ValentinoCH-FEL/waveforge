@@ -21,6 +21,8 @@ import shutil
 import subprocess
 import tempfile
 
+from audio_io import MUESTREO_NATIVO
+
 
 class ErrorImportacion(Exception):
     """Falta una herramienta externa, o la conversión/descarga falló."""
@@ -40,10 +42,16 @@ def _ffmpeg_disponible():
     return shutil.which("ffmpeg") is not None
 
 
+_CARPETA_TEMPORAL = os.path.join(tempfile.gettempdir(), "estudio_audio_temp")
+
+
 def _carpeta_temporal():
-    carpeta = os.path.join(tempfile.gettempdir(), "estudio_audio_temp")
-    os.makedirs(carpeta, exist_ok=True)
-    return carpeta
+    """Una carpeta nueva por importación. Las de importaciones anteriores se borran:
+    ese audio ya está cargado en memoria, así que los WAV temporales no se acumulan."""
+    os.makedirs(_CARPETA_TEMPORAL, exist_ok=True)
+    for nombre in os.listdir(_CARPETA_TEMPORAL):
+        shutil.rmtree(os.path.join(_CARPETA_TEMPORAL, nombre), ignore_errors=True)
+    return tempfile.mkdtemp(dir=_CARPETA_TEMPORAL)
 
 
 def convertir_a_wav(ruta_origen):
@@ -61,7 +69,7 @@ def convertir_a_wav(ruta_origen):
 
     comando = [
         "ffmpeg", "-y", "-i", ruta_origen,
-        "-ar", "44100", "-ac", "2", "-sample_fmt", "s16",
+        "-ar", str(MUESTREO_NATIVO), "-ac", "2", "-sample_fmt", "s16",
         destino,
     ]
     resultado = subprocess.run(comando, capture_output=True, text=True)
@@ -106,7 +114,7 @@ def descargar_audio(url, callback_progreso=None, duracion_maxima_s=None):
         "format": "bestaudio/best",
         "outtmpl": destino_base + ".%(ext)s",
         "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "wav"}],
-        "postprocessor_args": ["-ar", "44100", "-ac", "2"],
+        "postprocessor_args": ["-ar", str(MUESTREO_NATIVO), "-ac", "2"],
         "noplaylist": True,
         "no_color": True,
         "quiet": True,
