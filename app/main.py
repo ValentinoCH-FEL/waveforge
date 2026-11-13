@@ -80,6 +80,7 @@ class AppEstudioAudio:
         self._separando = False
         self._progreso = (0, 1)          # (muestras ya separadas, total)
         self._estado_separacion = ""     # mensaje al terminar o fallar la separación
+        self.var_calidad = tk.StringVar(value="rapida")  # clave de separador.CALIDADES
 
         # Panel interactivo
         self.var_parametro = None
@@ -150,6 +151,14 @@ class AppEstudioAudio:
         menu_archivo.add_separator()
         menu_archivo.add_command(label="Salir", command=self._salir)
         barra_menu.add_cascade(label="Archivo", menu=menu_archivo)
+
+        menu_separacion = tk.Menu(barra_menu, tearoff=0)
+        for clave, etiqueta in separador.CALIDADES.items():
+            menu_separacion.add_radiobutton(
+                label=f"Calidad: {etiqueta}", value=clave, variable=self.var_calidad,
+                command=self._cambiar_calidad,
+            )
+        barra_menu.add_cascade(label="Separación", menu=menu_separacion)
 
         menu_herramientas = tk.Menu(barra_menu, tearoff=0)
         menu_herramientas.add_command(label="Ver registro de la sesión...", command=self._ver_registro)
@@ -632,6 +641,10 @@ class AppEstudioAudio:
             return
 
         self._separando = True
+        self._espera_primer_trozo = (
+            "unos minutos (la primera vez descarga el modelo, ~900 MB)" if self.var_calidad.get() == "alta"
+            else "unos segundos"
+        )
         self._progreso = (0, len(self.izquierdo))
         self._inicio_separacion = time.perf_counter()
         self._actualizar_botones_exportar()
@@ -640,21 +653,22 @@ class AppEstudioAudio:
 
         threading.Thread(
             target=self._separar_en_hilo,
-            args=(self._sesion, self.izquierdo, self.derecho, self.info.muestreo),
+            args=(self._sesion, self.izquierdo, self.derecho, self.info.muestreo, self.var_calidad.get()),
             daemon=True,
         ).start()
 
-    def _separar_en_hilo(self, sesion, izquierdo, derecho, muestreo):
+    def _separar_en_hilo(self, sesion, izquierdo, derecho, muestreo, calidad):
         def avance(pistas, hecho, total):
             self.root.after(0, lambda: self._on_avance_separacion(sesion, pistas, hecho, total))
 
         try:
-            clave = separador.clave_audio(izquierdo, derecho, muestreo)
+            clave = separador.clave_audio(izquierdo, derecho, muestreo, calidad)
             pistas = separador.cargar_de_cache(clave)
             desde_cache = pistas is not None
             if not desde_cache:
                 pistas = separador.separar_por_partes(
-                    izquierdo, derecho, muestreo, al_avanzar=avance, cancelado=lambda: sesion != self._sesion
+                    izquierdo, derecho, muestreo, al_avanzar=avance,
+                    cancelado=lambda: sesion != self._sesion, calidad=calidad,
                 )
                 if pistas is None:
                     return  # cancelada: se cargó otro archivo
@@ -664,6 +678,20 @@ class AppEstudioAudio:
             self.root.after(0, lambda: self._separacion_fallida(sesion, mensaje))
             return
         self.root.after(0, lambda: self._separacion_lista(sesion, pistas, desde_cache))
+
+    def _cambiar_calidad(self):
+        """Otra calidad elegida en el menú: si hay una canción cargada, se vuelve a separar."""
+        if self.info is None or not hasattr(self, "_marco_pistas") or not self._marco_pistas.winfo_exists():
+            return  # se aplicará a la próxima canción
+        self._detener_audio()
+        self._sesion += 1  # cancela la separación en curso, si la hay
+        self.pistas = None
+        self._pista_sel = "mezcla"
+        self.var_pista_sel.set("mezcla")
+        self._estado_separacion = ""
+        self._construir_lista_filtros()
+        self._iniciar_separacion()
+        self._refrescar_vista_sin_sonar()
 
     def _tick_progreso(self):
         """Actualiza el reloj de la separación cada medio segundo."""
@@ -682,7 +710,7 @@ class AppEstudioAudio:
             f"Separando con IA... {self._formato_tiempo(hecho / sr)} de {self._formato_tiempo(total / sr)} "
             f"listo ({self._formato_tiempo(transcurrido)}). Ya puedes escuchar y editar lo separado."
             if hecho else
-            f"Separando con IA... la primera parte estará lista en unos segundos "
+            f"Separando con IA... la primera parte estará lista en {self._espera_primer_trozo} "
             f"({self._formato_tiempo(transcurrido)})."
         )
         try:
