@@ -58,7 +58,8 @@ pause
 exit /b 0
 
 :abrir
-start "" ".venv\Scripts\pythonw.exe" app\main.py
+REM Rutas completas: funciona aunque algo de arriba haya cambiado de carpeta.
+start "" "%~dp0.venv\Scripts\pythonw.exe" "%~dp0app\main.py"
 exit /b 0
 
 :error
