@@ -84,11 +84,12 @@ class Mezclador:
             return
         self._pos = 0
         try:
-            # Búfer de ~0.1 s y bloques fijos: si la interfaz está ocupada un instante,
-            # el audio no se entrecorta, y un cambio de volumen se sigue oyendo casi al momento.
+            # Búfer de ~0.25 s y bloques fijos: mientras la IA separa, el modelo karaoke retiene
+            # Python hasta ~160 ms seguidos; con un búfer menor eso se oía como cortes.
+            # Un cambio de volumen se sigue oyendo en menos de un cuarto de segundo.
             self._stream = sd.OutputStream(
                 samplerate=self._muestreo, channels=2, dtype="float32", callback=self._callback,
-                blocksize=1024, latency=0.1,
+                blocksize=1024, latency=0.25,
             )
             self._stream.start()
         except Exception as error:
