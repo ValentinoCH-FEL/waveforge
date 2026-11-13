@@ -20,6 +20,7 @@ import numpy as np
 import audio_io
 import ediciones
 import filtros_registry
+import identificador
 import procesamiento
 import reproductor
 import tema
@@ -56,6 +57,9 @@ class EditorMoldear(ttk.Frame):
         self._v0, self._v1 = 0, 1  # muestras visibles [v0, v1)
         self._arrastre = None
         self._anim_zoom = None
+        self._vol_tramo = {}      # id -> DoubleVar del deslizador "tramo" (con selección)
+        self._op_vivo = {}        # id -> operación de volumen que el deslizador va ajustando en vivo
+        self._render_pendiente = None
         self._suena_original = False
         self._contenido = None
         self._tick_activo = False
@@ -95,6 +99,7 @@ class EditorMoldear(ttk.Frame):
         self.estado = {p["id"]: self._crear_estado(p) for p in pistas}
         self.historial.limpiar()
         self.seleccion = None
+        self._vol_tramo, self._op_vivo = {}, {}
         self._suena_original = False
         self._v0, self._v1 = 0, self._largo()
         self._construir(nota)
@@ -189,6 +194,9 @@ class EditorMoldear(ttk.Frame):
             ("◢ Fade in", "Que el tramo entre de a poco", lambda: self._aplicar({"tipo": "fade_in"})),
             ("◣ Fade out", "Que el tramo se apague de a poco", lambda: self._aplicar({"tipo": "fade_out"})),
             ("⟲ Limpiar", "Quitar las ediciones que tocan el tramo", self._limpiar_tramo),
+            ("🎤 Identificar voz", "Marca en la pista de voz un tramo donde se oiga SOLO al cantante y pulsa:\n"
+                                  "se quita de esa pista todo lo que no sea su voz (público, otras personas).",
+             self._identificar_voz),
         ):
             b = BotonAnimado(fila, texto, accion, ayuda=ayuda, alto=28,
                              estilo="peligro" if "Limpiar" in texto else "normal")
@@ -280,14 +288,29 @@ class EditorMoldear(ttk.Frame):
             if alto > ALTOS[0]:
                 medio = tk.Frame(dentro, bg=tema.PANEL)
                 medio.pack(fill="x", pady=(4, 0))
-                etiqueta = tk.Label(medio, text=f"{est['vol'].get():.0f}%", bg=tema.PANEL, fg=tema.TEXTO_SUAVE,
-                                    width=5, anchor="e")
-                escala = ttk.Scale(medio, from_=0, to=150, variable=est["vol"], orient="horizontal",
-                                   command=lambda v, e=etiqueta: (e.config(text=f"{float(v):.0f}%"),
-                                                                  self._mezcla_cambio()))
+                en_tramo = bool(self.seleccion) and pista["id"] in self.seleccion[2]
+                if en_tramo:
+                    # Hay un tramo elegido en esta pista: el deslizador cambia SOLO ese tramo.
+                    var = self._vol_tramo.setdefault(pista["id"], tk.DoubleVar(value=100.0))
+                    tk.Label(medio, text="tramo", bg=tema.PANEL, fg=tema.AZUL,
+                             font=("TkDefaultFont", 8, "bold")).pack(side="left", padx=(0, 4))
+                    etiqueta = tk.Label(medio, text=f"{var.get():.0f}%", bg=tema.PANEL, fg=tema.AZUL, width=5,
+                                        anchor="e")
+                    escala = ttk.Scale(medio, from_=0, to=200, variable=var, orient="horizontal",
+                                       command=lambda v, e=etiqueta, i=pista["id"]: (
+                                           e.config(text=f"{float(v):.0f}%"), self._volumen_tramo(i, float(v))))
+                    Ayuda(escala, "Volumen SOLO del tramo seleccionado (0-200 %).\n"
+                                  "Para cambiar la pista entera, quita la selección (click o Esc).")
+                else:
+                    etiqueta = tk.Label(medio, text=f"{est['vol'].get():.0f}%", bg=tema.PANEL, fg=tema.TEXTO_SUAVE,
+                                        width=5, anchor="e")
+                    escala = ttk.Scale(medio, from_=0, to=150, variable=est["vol"], orient="horizontal",
+                                       command=lambda v, e=etiqueta: (e.config(text=f"{float(v):.0f}%"),
+                                                                      self._mezcla_cambio()))
+                    Ayuda(escala, "Volumen de la pista entera (0-150 %).\n"
+                                  "Con un tramo seleccionado, este control cambia solo ese tramo.")
                 escala.pack(side="left", fill="x", expand=True)
                 etiqueta.pack(side="left")
-                Ayuda(escala, "Volumen de la pista (0-150 %)")
             if alto >= ALTOS[2] and est["ops"]:
                 for op in est["ops"][-4:]:
                     tk.Label(dentro, text=f"• {ediciones.describir(op, self.info.muestreo)}  "
@@ -404,6 +427,8 @@ class EditorMoldear(ttk.Frame):
         if len(self._visibles()) <= 1:
             messagebox.showinfo("Moldear", "Tiene que quedar al menos una pista.")
             return
+        self._terminar_volumen_tramo()
+        self._vol_tramo, self._op_vivo = {}, {}
         self.estado[id_p]["eliminada"] = True
         self.historial.registrar({"tipo": "eliminar", "id": id_p})
         if self.seleccion:
@@ -420,14 +445,24 @@ class EditorMoldear(ttk.Frame):
         self._construir_carriles()
 
     def deshacer(self):
+        self._terminar_volumen_tramo()
         accion = self.historial.deshacer()
         if accion:
             self._revertir(accion, deshacer=True)
+            self._reiniciar_deslizadores_tramo()
 
     def rehacer(self):
+        self._terminar_volumen_tramo()
         accion = self.historial.rehacer()
         if accion:
             self._revertir(accion, deshacer=False)
+            self._reiniciar_deslizadores_tramo()
+
+    def _reiniciar_deslizadores_tramo(self):
+        if self._op_vivo or self._vol_tramo:
+            self._vol_tramo, self._op_vivo = {}, {}
+            if self.seleccion:
+                self._construir_carriles()
 
     def _revertir(self, accion, deshacer):
         tipo = accion["tipo"]
@@ -641,22 +676,178 @@ class EditorMoldear(ttk.Frame):
             # Fue un click: solo quita la selección. NO mueve la música: al ir a seleccionar,
             # un click sin querer cambiaba lo que sonaba. El cabezal se mueve desde la regla.
             self.seleccion = None
-            self._dibujar_seleccion()
-            self._actualizar_botones()
+        self._cambio_seleccion()
 
     def _doble_click(self, evento):
         if evento.x < ANCHO_CABECERA:
             return
         pista = self._visibles()[self._pista_en(evento.y)]
         self.seleccion = (0, self._largo(), [pista["id"]])
-        self._dibujar_seleccion()
-        self._actualizar_botones()
+        self._cambio_seleccion()
 
     def seleccionar_todo(self):
         if self.lienzo is not None:
             self.seleccion = (0, self._largo(), [p["id"] for p in self._visibles()])
-            self._dibujar_seleccion()
+            self._cambio_seleccion()
+
+    def _cambio_seleccion(self):
+        """La selección cambió: los deslizadores de las pistas elegidas pasan a controlar el tramo
+        (o vuelven a controlar la pista entera si ya no hay selección)."""
+        self._terminar_volumen_tramo()
+        self._vol_tramo, self._op_vivo = {}, {}
+        self._construir_carriles()
+        self._actualizar_botones()
+
+    def _volumen_tramo(self, id_p, porcentaje):
+        """El deslizador de una pista con tramo elegido: ajusta en vivo una sola edición de volumen
+        sobre ese tramo (deshacer la quita entera)."""
+        if not self.seleccion or id_p not in self.seleccion[2]:
+            return
+        i0, i1, _ids = self.seleccion
+        db = -80.0 if porcentaje < 0.5 else 20.0 * np.log10(porcentaje / 100.0)
+        op = self._op_vivo.get(id_p)
+        if op is None:
+            if abs(db) < 0.05:
+                return
+            op = {"tipo": "ganancia", "i0": i0, "i1": i1, "db": db}
+            self.estado[id_p]["ops"].append(op)
+            self.historial.registrar({"tipo": "ops", "cambios": [(id_p, op)]})
+            self._op_vivo[id_p] = op
+        else:
+            op["db"] = db
+        # recalcular el audio cuando el deslizador se queda quieto un instante (moverlo no traba)
+        if self._render_pendiente:
+            self.after_cancel(self._render_pendiente)
+        self._render_pendiente = self.after(90, self._render_vivo)
+
+    def _render_vivo(self):
+        self._render_pendiente = None
+        if self._op_vivo and self.info is not None:
+            self._rerenderizar(list(self._op_vivo))
+            self._redibujar()
             self._actualizar_botones()
+
+    def _terminar_volumen_tramo(self):
+        """Antes de cambiar de selección: aplica lo pendiente y lo anota en el registro."""
+        if self._render_pendiente:
+            self.after_cancel(self._render_pendiente)
+            self._render_vivo()
+        for id_p, op in self._op_vivo.items():
+            if any(o is op for o in self.estado[id_p]["ops"]):
+                self._registrar_log(f"Moldear: volumen del tramo {ediciones.describir(op, self.info.muestreo)} "
+                                    f"en {id_p}")
+
+    # =====================================================================
+    # Identificador de voz
+    # =====================================================================
+
+    def _identificar_voz(self):
+        if not self.seleccion:
+            return
+        i0, i1, ids = self.seleccion
+        sr = self.info.muestreo
+        if len(ids) != 1:
+            messagebox.showinfo("Identificar voz", "Elige el tramo en UNA sola pista: la de la voz "
+                                                   "(normalmente «Voz principal»).")
+            return
+        if (i1 - i0) / sr < 1.0:
+            messagebox.showinfo("Identificar voz", "Marca al menos 1 segundo (mejor de 3 a 10) donde se oiga "
+                                                   "solo al cantante, sin público.")
+            return
+        id_p = ids[0]
+        izq, der = self.estado[id_p]["render"]
+        mono = izq if der is None else (izq + der) * np.float32(0.5)
+        for b in self._botones_tramo:
+            b.habilitar(False)
+        self.etiqueta_sel.config(text="🎤 Analizando la voz... 0%", fg=tema.AZUL)
+
+        def avance(fraccion):
+            self.after(0, lambda: self.etiqueta_sel.config(text=f"🎤 Analizando la voz... {fraccion * 100:.0f}%"))
+
+        def trabajo():
+            try:
+                if not identificador.modelo_descargado():
+                    self.after(0, lambda: self.etiqueta_sel.config(text="🎤 Descargando el modelo de voz (~26 MB)..."))
+                parecidos, activas = identificador.analizar(mono, sr, i0, i1, al_avanzar=avance)
+                fin = lambda: self._dialogo_identificador(id_p, parecidos, activas)
+            except Exception as error:
+                mensaje = str(error)
+                fin = lambda: (self._actualizar_botones(), messagebox.showerror("Identificar voz", mensaje))
+            self.after(0, fin)
+
+        threading.Thread(target=trabajo, daemon=True).start()
+
+    def _dialogo_identificador(self, id_p, parecidos, activas):
+        """Ventana para ajustar cuánto se quita, escuchando en vivo antes de aceptar."""
+        sr = self.info.muestreo
+        etiqueta_pista = next(p["etiqueta"] for p in self.pistas if p["id"] == id_p)
+        op = {"tipo": "curva", "i0": 0, "i1": self._largo(), "paso": identificador.PASO_S * sr,
+              "valores": identificador.curva(parecidos, activas, 0.6), "exigencia": 0.6}
+        self.estado[id_p]["ops"].append(op)
+        self._rerenderizar([id_p])
+        self._redibujar()
+
+        ventana = tk.Toplevel(self)
+        ventana.title("Identificador de voz")
+        ventana.configure(bg=tema.FONDO)
+        ventana.transient(self.winfo_toplevel())
+        ventana.resizable(False, False)
+        caja = tk.Frame(ventana, bg=tema.FONDO)
+        caja.pack(padx=20, pady=16)
+        tk.Label(caja, text="🎤  Identificador de voz", bg=tema.FONDO, fg=tema.TEXTO,
+                 font=("TkDefaultFont", 12, "bold")).pack(anchor="w")
+        tk.Label(caja, bg=tema.FONDO, fg=tema.TEXTO_SUAVE, justify="left", wraplength=440,
+                 text=f"Se comparó cada momento de «{etiqueta_pista}» con la voz del tramo que marcaste. "
+                      "Donde la voz no se parece a la del cantante, se baja.\n\n"
+                      "Mueve la exigencia escuchando (Espacio o el botón): más alta quita más público, "
+                      "pero si es demasiado alta empieza a cortar al cantante. Cuando el público canta "
+                      "al mismo tiempo que él, eso no se puede quitar por momentos: para eso está "
+                      "el Modo concierto.").pack(anchor="w", pady=(4, 12))
+        fila = tk.Frame(caja, bg=tema.FONDO)
+        fila.pack(fill="x")
+        tk.Label(fila, text="Exigencia", bg=tema.FONDO, fg=tema.TEXTO).pack(side="left")
+        var = tk.DoubleVar(value=0.6)
+        etiqueta_valor = tk.Label(fila, bg=tema.FONDO, fg=tema.AZUL, width=6, font=("TkDefaultFont", 10, "bold"))
+        resumen = tk.Label(caja, bg=tema.FONDO, fg=tema.TEXTO_SUAVE, anchor="w")
+        pendiente = [None]
+
+        def actualizar(*_):
+            exigencia = round(var.get(), 2)
+            op["valores"] = identificador.curva(parecidos, activas, exigencia)
+            op["exigencia"] = exigencia
+            etiqueta_valor.config(text=f"{exigencia * 100:.0f}%")
+            con_voz = max(int(activas.sum()), 1)
+            quitado = float(((1.0 - op["valores"]) * activas).sum()) / con_voz
+            resumen.config(text=f"Se baja en ~{quitado * 100:.0f}% del tiempo en que hay voz.")
+            if pendiente[0]:
+                self.after_cancel(pendiente[0])
+            pendiente[0] = self.after(120, lambda: (self._rerenderizar([id_p]), self._redibujar()))
+
+        ttk.Scale(fila, from_=0.0, to=1.0, variable=var, orient="horizontal", length=260,
+                  command=actualizar).pack(side="left", padx=10)
+        etiqueta_valor.pack(side="left")
+        resumen.pack(fill="x", pady=(8, 12))
+        actualizar()
+
+        def cerrar(aceptar):
+            if pendiente[0]:
+                self.after_cancel(pendiente[0])
+            if aceptar:
+                self.historial.registrar({"tipo": "ops", "cambios": [(id_p, op)]})
+                self._despues_de_editar([id_p], ediciones.describir(op, sr))
+            else:
+                self.estado[id_p]["ops"][:] = [o for o in self.estado[id_p]["ops"] if o is not op]
+                self._despues_de_editar([id_p], "Identificador cancelado", registrar=False)
+            ventana.destroy()
+
+        botones = tk.Frame(caja, bg=tema.FONDO)
+        botones.pack(fill="x")
+        BotonAnimado(botones, "▶ / ❚❚  Escuchar", self._alternar_reproduccion, alto=32).pack(side="left")
+        BotonAnimado(botones, "✓  Aplicar", lambda: cerrar(True), estilo="acento", alto=32).pack(side="right")
+        BotonAnimado(botones, "Cancelar", lambda: cerrar(False), alto=32).pack(side="right", padx=8)
+        ventana.protocol("WM_DELETE_WINDOW", lambda: cerrar(False))
+        ventana.bind("<space>", lambda e: self._alternar_reproduccion())
+        ventana.grab_set()
 
     def _click_regla(self, evento):
         self.mezclador.ir_a(self._muestra(evento.x))
@@ -836,7 +1027,7 @@ class EditorMoldear(ttk.Frame):
             "alejar": lambda: self.zoom(0.5),
             "inicio": self._al_inicio,
             "todo": self.seleccionar_todo,
-            "escape": lambda: (setattr(self, "seleccion", None), self._dibujar_seleccion(), self._actualizar_botones()),
+            "escape": lambda: (setattr(self, "seleccion", None), self._cambio_seleccion()),
         }
         if nombre in acciones:
             acciones[nombre]()
