@@ -156,6 +156,18 @@ def aplicar(root):
         lightcolor=AZUL, darkcolor=AZUL,
     )
 
+    # Pestañas (Separación con IA / Estudio)
+    estilo.configure("TNotebook", background=FONDO, bordercolor=BORDE, lightcolor=FONDO, darkcolor=FONDO,
+                     tabmargins=(12, 8, 12, 0))
+    estilo.configure("TNotebook.Tab", background=PANEL, foreground=TEXTO_SUAVE, bordercolor=BORDE,
+                     lightcolor=PANEL, darkcolor=PANEL, padding=(14, 6), font=("TkDefaultFont", 10, "bold"))
+    estilo.map(
+        "TNotebook.Tab",
+        background=[("selected", PANEL_2), ("active", "#2e2e35")],
+        foreground=[("selected", AZUL), ("active", TEXTO)],
+        lightcolor=[("selected", AZUL)],
+    )
+
     estilo.configure("TSeparator", background=BORDE)
     estilo.configure(
         "Treeview", background=PANEL, fieldbackground=PANEL, foreground=TEXTO,
