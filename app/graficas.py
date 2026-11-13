@@ -10,6 +10,8 @@ reemplazan las ondas: rehacer la figura entera tardaba ~0.3-0.8 s y trababa
 la interfaz y el audio.
 """
 
+import tkinter as tk
+
 import numpy as np
 from matplotlib.ticker import FuncFormatter
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -20,6 +22,11 @@ import tema
 # La onda se dibuja con la envolvente (mín./máx.) de ~1200 columnas: más puntos
 # no se ven en pantalla y solo hacen más lento el dibujo.
 _COLUMNAS = 1200
+
+# Márgenes de las ondas dentro de la figura (fracción del ancho). La barra de reproducción
+# usa los mismos, así queda alineada justo debajo de las ondas.
+MARGEN_IZQ = 0.012
+MARGEN_DER = 0.996
 
 
 def _preparar_para_grafica(muestras, muestreo, inicio_s=0.0, max_puntos=2 * _COLUMNAS):
@@ -59,6 +66,7 @@ class GraficaPistas:
         self._canvas = FigureCanvasTkAgg(self._fig, master=frame_padre)
         self.widget = self._canvas.get_tk_widget()
         self._firma = None    # (título, color) de cada franja: si cambia, se rehacen los ejes
+        self._envolventes = {}  # id(muestras) -> (muestras, t, y): una canción entera tarda en resumirse
         self._ejes = []
         self._rellenos = []
         self._textos = []
@@ -67,7 +75,7 @@ class GraficaPistas:
         self._fig.clear()
         cantidad = len(carriles)
         self._ejes, self._rellenos, self._textos = [], [], []
-        for i, (titulo, color, _muestras, _atenuado) in enumerate(carriles):
+        for i, (titulo, color, *_resto) in enumerate(carriles):
             eje = self._fig.add_subplot(cantidad, 1, i + 1, sharex=self._ejes[0] if self._ejes else None)
             eje.set_facecolor(tema.ONDA_FONDO)
             for borde in eje.spines.values():
@@ -89,11 +97,24 @@ class GraficaPistas:
         # El eje de tiempo se muestra como m:ss (sin etiqueta, para no recortarse en ventanas bajas).
         self._ejes[-1].xaxis.set_major_formatter(FuncFormatter(_formato_tiempo))
         self._fig.subplots_adjust(
-            left=0.012, right=0.996, top=0.985, bottom=0.10 if cantidad <= 2 else 0.12, hspace=0.07
+            left=MARGEN_IZQ, right=MARGEN_DER, top=0.985, bottom=0.10 if cantidad <= 2 else 0.12, hspace=0.07
         )
 
+    def _envolvente(self, muestras, muestreo, inicio_s):
+        """La envolvente de cada arreglo se calcula una sola vez: mover un volumen solo la reescala
+        (con la canción completa, recalcularla en cada cambio trababa la interfaz)."""
+        guardada = self._envolventes.get(id(muestras))
+        if guardada is not None and guardada[0] is muestras:
+            return guardada[1], guardada[2]
+        t, y = _preparar_para_grafica(muestras, muestreo, inicio_s)
+        if len(self._envolventes) > 32:
+            self._envolventes.clear()
+        self._envolventes[id(muestras)] = (muestras, t, y)  # guardar `muestras` evita que su id se reutilice
+        return t, y
+
     def dibujar(self, carriles, muestreo, inicio_s=0.0, escala_comun=False):
-        """carriles: lista de (titulo, color, muestras, atenuado).
+        """carriles: lista de (titulo, color, muestras, atenuado, escala); escala multiplica la onda
+        (el volumen de la pista).
         escala_comun: True = todas las franjas usan la misma altura, así se ve qué pista
         suena más fuerte; False = cada una se ajusta a su propio tamaño."""
         firma = tuple((c[0], c[1]) for c in carriles)
@@ -101,11 +122,14 @@ class GraficaPistas:
             self._crear_ejes(carriles)
             self._firma = firma
 
-        datos = [_preparar_para_grafica(c[2], muestreo, inicio_s) for c in carriles]
+        datos = []
+        for _titulo, _color, muestras, _atenuado, escala in carriles:
+            t, y = self._envolvente(muestras, muestreo, inicio_s)
+            datos.append((t, y if escala == 1.0 else y * np.float32(escala)))
         picos = [float(np.max(np.abs(y))) if len(y) else 0.0 for _, y in datos]
         limite_comun = max(max(picos) * 1.1, 1e-4)
 
-        for i, ((titulo, color, _muestras, atenuado), (t, y)) in enumerate(zip(carriles, datos)):
+        for i, ((titulo, color, _muestras, atenuado, _escala), (t, y)) in enumerate(zip(carriles, datos)):
             eje = self._ejes[i]
             if self._rellenos[i] is not None:
                 self._rellenos[i].remove()
@@ -120,3 +144,43 @@ class GraficaPistas:
         if len(datos[0][0]):
             self._ejes[0].set_xlim(datos[0][0][0], datos[0][0][-1])
         self._canvas.draw_idle()
+
+
+class BarraReproduccion:
+    """Línea de tiempo bajo las ondas: muestra por dónde va la reproducción y, con un click
+    o arrastrando, salta a otra parte. al_buscar(fraccion) recibe un valor entre 0 y 1."""
+
+    _ALTO = 22
+
+    def __init__(self, frame_padre, al_buscar):
+        self._al_buscar = al_buscar
+        self._fraccion = 0.0
+        self.widget = tk.Canvas(frame_padre, height=self._ALTO, bg=tema.FONDO, highlightthickness=0, bd=0,
+                                cursor="hand2")
+        self.widget.bind("<Configure>", lambda _e: self._dibujar())
+        self.widget.bind("<Button-1>", self._click)
+        self.widget.bind("<B1-Motion>", self._click)
+
+    def _limites(self):
+        ancho = max(self.widget.winfo_width(), 1)
+        return ancho * MARGEN_IZQ, ancho * MARGEN_DER
+
+    def _click(self, evento):
+        x0, x1 = self._limites()
+        self._al_buscar(min(max((evento.x - x0) / max(x1 - x0, 1), 0.0), 1.0))
+
+    def mostrar(self, fraccion):
+        fraccion = min(max(fraccion, 0.0), 1.0)
+        if abs(fraccion - self._fraccion) > 1e-4:
+            self._fraccion = fraccion
+            self._dibujar()
+
+    def _dibujar(self):
+        c = self.widget
+        c.delete("all")
+        x0, x1 = self._limites()
+        medio = self._ALTO // 2
+        x = x0 + (x1 - x0) * self._fraccion
+        c.create_rectangle(x0, medio - 3, x1, medio + 3, fill=tema.ONDA_FONDO, outline=tema.BORDE)
+        c.create_rectangle(x0, medio - 3, x, medio + 3, fill=tema.AZUL, outline="")
+        c.create_oval(x - 7, medio - 7, x + 7, medio + 7, fill=tema.TEXTO, outline=tema.AZUL, width=2)
