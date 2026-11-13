@@ -45,6 +45,7 @@ class Mezclador:
         self._ganancia_actual = np.zeros(0, dtype=np.float32)
         self._pos = 0
         self._stream = None
+        self.nivel = (0.0, 0.0)  # pico del último bloque que sonó (izq, der), para el vúmetro
 
     @property
     def sonando(self):
@@ -150,5 +151,6 @@ class Mezclador:
             self._pos = pos + k if k else max(pos, n)
             self._ganancia_actual = gan
             np.clip(outdata, -1.0, 1.0, out=outdata)
+            self.nivel = (float(np.abs(outdata[:, 0]).max()), float(np.abs(outdata[:, 1]).max()))
         except Exception:
             outdata.fill(0.0)
