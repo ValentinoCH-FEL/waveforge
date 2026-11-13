@@ -35,7 +35,8 @@ separa:
 
 **2. Moldear** — después se moldea, en un editor de pistas en línea de tiempo:
 - Cada pista en su carril, con volumen, M (silenciar), S (solo), tamaño
-  del carril y eliminar.
+  del carril y eliminar. Con un tramo elegido, el volumen de la pista
+  cambia **solo ese tramo**, en vivo.
 - Zoom animado (Ctrl+rueda o botones), moverse en el tiempo
   (Shift+rueda o la barra de abajo), cabezal de reproducción, reloj y
   vúmetro estéreo.
@@ -44,6 +45,13 @@ separa:
   un efecto: **ecualizador de graves, medios y agudos**, pasa-bajos,
   pasa-altos, normalización o limpiar ruido. Todos los efectos corren en
   el motor nativo en C++.
+- **Identificador de voz**: en la pista de voz se marca un tramo donde
+  se oye solo al cantante y se pulsa «🎤 Identificar voz». La app saca
+  la huella de esa voz y, en cada momento de la pista, baja lo que no se
+  parece (público, otras personas). Una «exigencia» ajustable, con vista
+  previa en vivo, decide cuánto se quita. Lo que suena *al mismo tiempo*
+  que el cantante no se puede quitar así: para eso está el Modo
+  concierto, y los dos se combinan.
 - Las ediciones no tocan el audio original: deshacer/rehacer (Ctrl+Z /
   Ctrl+Y) es exacto. Cada tramo editado queda marcado en su carril.
 - A/B: escuchar la canción original en el mismo segundo, para comparar.
@@ -82,6 +90,7 @@ Guarda un registro (`registro.log`) de lo que se hizo y cuándo.
 │   ├── main.py               # ventana y pestañas; Separación con IA
 │   ├── editor.py             # pestaña Moldear: carriles, zoom, tramos, deshacer
 │   ├── ediciones.py          # ediciones por tramo (sin Tk) + resumen de ondas
+│   ├── identificador.py      # huella de voz del cantante (WeSpeaker, ONNX)
 │   ├── widgets.py            # botones animados, vúmetro, ayudas
 │   ├── separador.py          # separación con IA por trozos + caché
 │   ├── importador.py         # convertir archivos (ffmpeg) y descargar de YouTube (yt-dlp)
@@ -166,6 +175,16 @@ NVIDIA) con 16 GB de RAM:
 
 Convertir el archivo no es lo lento: ffmpeg pasa una canción de 4 min a
 WAV en ~0.2 s. El tiempo se va en la separación con IA.
+
+## Modelos de IA que usa
+
+| Modelo | Para qué | Licencia |
+|---|---|---|
+| Demucs `htdemucs_6s` (Meta) | Separar voz, batería, bajo, guitarra, piano y otros | MIT |
+| UVR-MDX-NET Karaoke 2 | Voz principal / coros | Comunidad UVR |
+| UVR-MDX-NET Crowd HQ (Aufr33) | Modo concierto: quitar al público | Comunidad UVR |
+| Mel-Band RoFormer (Kimberley Jensen) | Calidad alta: sacar la voz | Revisar antes de uso comercial |
+| [WeSpeaker ResNet34-LM](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM) | Identificador de voz (huella de quien canta) | CC-BY-4.0 |
 
 ## Cómo agregar un filtro nuevo (pensado para escalar)
 
