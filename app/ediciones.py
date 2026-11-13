@@ -25,6 +25,7 @@ NOMBRES = {
     "fade_in": "Fade in",
     "fade_out": "Fade out",
     "efecto": "Efecto",
+    "curva": "Identificador de voz",
 }
 
 
@@ -59,6 +60,11 @@ def _aplicar_una(motor, canal, op, muestreo):
         tramo *= np.linspace(0.0, 1.0, i1 - i0, dtype=np.float32)
     elif tipo == "fade_out":
         tramo *= np.linspace(1.0, 0.0, i1 - i0, dtype=np.float32)
+    elif tipo == "curva":
+        # una ganancia que cambia en el tiempo (ej. el identificador de voz): un valor cada `paso` muestras
+        valores = np.asarray(op["valores"], dtype=np.float32)
+        tiempos = np.arange(len(valores), dtype=np.float64) * op["paso"]
+        tramo *= np.interp(np.arange(i0, i1, dtype=np.float64), tiempos, valores).astype(np.float32)
     elif tipo == "efecto":
         info = filtros_registry.obtener(op["filtro"])
         if info["funcion_nativa"] is None or motor is None:
@@ -90,6 +96,8 @@ def describir(op, muestreo):
     tipo = op["tipo"]
     if tipo == "ganancia":
         return f"Volumen {op['db']:+.0f} dB"
+    if tipo == "curva":
+        return f"Identificador de voz (exigencia {op.get('exigencia', 0) * 100:.0f}%)"
     if tipo == "efecto":
         info = filtros_registry.obtener(op["filtro"])
         p = info["parametro"]
