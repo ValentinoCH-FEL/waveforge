@@ -12,8 +12,6 @@ Panel interactivo: todo lo demás en una sola pantalla.
 
 import datetime
 import os
-import platform
-import subprocess
 import threading
 import time
 import traceback
@@ -26,7 +24,6 @@ import audio_io
 import filtros_registry
 import graficas
 import importador
-import modo_datos
 import procesamiento
 import reproductor
 import separador
@@ -155,7 +152,6 @@ class AppEstudioAudio:
         barra_menu.add_cascade(label="Archivo", menu=menu_archivo)
 
         menu_herramientas = tk.Menu(barra_menu, tearoff=0)
-        menu_herramientas.add_command(label="Modo de datos (CSV)...", command=self._abrir_modo_datos)
         menu_herramientas.add_command(label="Ver registro de la sesión...", command=self._ver_registro)
         barra_menu.add_cascade(label="Herramientas", menu=menu_herramientas)
 
@@ -164,12 +160,6 @@ class AppEstudioAudio:
         barra_menu.add_cascade(label="Ayuda", menu=menu_ayuda)
 
         self.root.config(menu=barra_menu)
-
-    def _abrir_modo_datos(self):
-        if self.motor is None:
-            messagebox.showwarning("Motor no disponible", "Compila la librería nativa primero.")
-            return
-        modo_datos.abrir_modo_datos(self.root, self.motor)
 
     def _ver_registro(self):
         ventana = tk.Toplevel(self.root)
@@ -627,7 +617,7 @@ class AppEstudioAudio:
             etiqueta = self._etiquetas_volumen.get(e["pista"]["id"])
             if etiqueta is not None:
                 etiqueta.config(text=f"{round(e['vol'] * 100)}%")
-        if reproductor.disponible() and self._mezclador.cantidad_pistas == len(elementos):
+        if self._mezclador.cantidad_pistas == len(elementos):
             self._mezclador.cambiar_ganancias([e["ganancia"] for e in elementos])
         self._programar_vista_previa(espera_ms=400)
 
@@ -920,8 +910,6 @@ class AppEstudioAudio:
     def _configurar_audio(self, procesadas, ganancias):
         """Deja lista la mezcla para escucharla. Si ya está sonando, el cambio se oye sin cortar."""
         self._audio_mezcla = (procesadas, ganancias)
-        if not reproductor.disponible():
-            return
         self._mezclador.configurar(self.info.muestreo, procesadas, ganancias, reiniciar=self._reiniciar_audio)
         self._reiniciar_audio = False
         if (
@@ -944,12 +932,8 @@ class AppEstudioAudio:
         if self._audio_mezcla is None:
             return
         procesadas, ganancias = self._audio_mezcla
-        if reproductor.disponible():
-            self._mezclador.configurar(self.info.muestreo, procesadas, ganancias, reiniciar=True)
-            self._iniciar_audio()
-        else:
-            izq, der = procesamiento.mezclar(procesadas, ganancias)
-            self._reproducir_con_el_sistema(izq, der)
+        self._mezclador.configurar(self.info.muestreo, procesadas, ganancias, reiniciar=True)
+        self._iniciar_audio()
 
     def _escuchar_original(self):
         if self.info is None:
@@ -957,26 +941,8 @@ class AppEstudioAudio:
         i0, i1 = self._limites_region()
         izq = self.izquierdo[i0:i1]
         der = self.derecho[i0:i1] if self.derecho is not None else None
-        if reproductor.disponible():
-            self._mezclador.configurar(self.info.muestreo, [(izq, der)], [1.0], reiniciar=True)
-            self._iniciar_audio()
-        else:
-            self._reproducir_con_el_sistema(izq, der)
-
-    def _reproducir_con_el_sistema(self, izquierdo, derecho):
-        """Respaldo si no hay sounddevice: usa el reproductor de Windows (no es en vivo)."""
-        ruta_temporal = os.path.join(RAIZ_PROYECTO, "_reproduccion_temp.wav")
-        try:
-            audio_io.guardar_wav(ruta_temporal, self.info.muestreo, izquierdo, derecho)
-            sistema = platform.system()
-            if sistema == "Windows":
-                os.startfile(ruta_temporal)  # noqa: abre con el reproductor por defecto de Windows
-            elif sistema == "Darwin":
-                subprocess.Popen(["afplay", ruta_temporal])
-            else:
-                subprocess.Popen(["xdg-open", ruta_temporal])
-        except Exception as error:
-            messagebox.showerror("No se pudo reproducir", f"No se pudo reproducir el audio:\n{error}")
+        self._mezclador.configurar(self.info.muestreo, [(izq, der)], [1.0], reiniciar=True)
+        self._iniciar_audio()
 
     # ---------- exportar ----------
 
