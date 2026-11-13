@@ -32,8 +32,6 @@ Interfaces y Dispositivos Periféricos.
 - Grafica las ondas de cada pista, reproduce la mezcla o el original,
   y exporta la mezcla o cada pista por separado como WAV.
 - Guarda un registro (`registro.log`) de lo que se hizo y cuándo.
-- Modo alterno de datos CSV (Herramientas → Modo de datos), reusando
-  el mismo motor nativo para una transformación numérica simple.
 
 ## Estructura
 
@@ -55,8 +53,7 @@ Interfaces y Dispositivos Periféricos.
 │   ├── filtros_registry.py   # catálogo de filtros disponibles
 │   ├── audio_io.py           # cargar/guardar/validar WAV
 │   ├── graficas.py           # ondas de cada pista (matplotlib)
-│   ├── tema.py               # colores y estilos de la interfaz
-│   └── modo_datos.py         # modo alterno CSV
+│   └── tema.py               # colores y estilos de la interfaz
 ├── requirements.txt
 └── README.md
 ```
@@ -71,7 +68,7 @@ y agrega su `bin` al PATH. En Mac ya viene con las Command Line Tools
 de Xcode (`xcode-select --install`). En Linux instala `g++` con el
 gestor de paquetes de tu distro.
 
-Luego, parado en la carpeta `native/`:
+Luego corre el script de tu sistema, que está en `native/`:
 
 - Windows: `build_windows.bat`
 - Mac: `./build_mac.sh`
@@ -121,12 +118,13 @@ veces más rápida, sin cambiar nada del código.
 1. Crea `native/filtros/tu_filtro.cpp` con la firma común
    `(float* entrada, float* salida, int cantidad, float parametro)` y
    decláralo en `native/filtro.h`.
-2. Agrégalo a la lista de fuentes en los tres `build_*` y a la lista de
-   nombres en `app/motor.py` (`_declarar_firmas`).
-3. Agrega una entrada en `app/filtros_registry.py` con su etiqueta,
-   descripción y rango de parámetro.
+2. Agrega una entrada en `app/filtros_registry.py` con su etiqueta,
+   descripción, rango de parámetro y `funcion_nativa` (el nombre de la
+   función en C++).
+3. Vuelve a compilar con el `build_*` de tu sistema: compilan todos los
+   `.cpp` de `native/filtros/` sin tener que anotarlos.
 
-Nada en `main.py` necesita cambiar — por eso esta estructura es la base
+Nada en `main.py` ni en `motor.py` necesita cambiar — por eso esta estructura es la base
 pensada para, más adelante, convertir esto en un motor de DJ
 personalizado (más efectos, mezcla, detección de BPM, etc.) sin
 reescribir lo que ya funciona.
