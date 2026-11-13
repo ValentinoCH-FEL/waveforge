@@ -217,8 +217,9 @@ class EditorMoldear(ttk.Frame):
         # --- zona de pistas: regla + lienzo con carriles ---
         zona = ttk.Frame(raiz)
         zona.pack(fill="both", expand=True, padx=16, pady=(8, 0))
-        self.regla = tk.Canvas(zona, height=ALTO_REGLA, bg=tema.PANEL, highlightthickness=0, bd=0)
+        self.regla = tk.Canvas(zona, height=ALTO_REGLA, bg=tema.PANEL, highlightthickness=0, bd=0, cursor="hand2")
         self.regla.pack(fill="x")
+        Ayuda(self.regla, "Click o arrastrar aquí: mover la reproducción a ese momento")
         cuerpo = ttk.Frame(zona)
         cuerpo.pack(fill="both", expand=True)
         self.lienzo = tk.Canvas(cuerpo, bg=tema.FONDO, highlightthickness=0, bd=0)
@@ -231,7 +232,7 @@ class EditorMoldear(ttk.Frame):
 
         ayuda = tk.Label(raiz, bg=tema.FONDO, fg=tema.TEXTO_SUAVE, anchor="w", font=("TkDefaultFont", 8),
                          text="Arrastra sobre una pista para elegir un tramo (hacia arriba/abajo abarca más pistas) · "
-                              "Doble click: pista entera · Ctrl+A: todo · Click: mover el cabezal · "
+                              "Doble click: pista entera · Ctrl+A: todo · Click en la regla de tiempo: mover la reproducción · "
                               "Ctrl+rueda: zoom · Shift+rueda: moverse · Espacio: reproducir · Supr: silenciar")
         ayuda.pack(fill="x", padx=16, pady=(4, 8))
 
@@ -618,7 +619,7 @@ class EditorMoldear(ttk.Frame):
         if not self._arrastre:
             return
         inicio, pista0, x0 = self._arrastre
-        if abs(evento.x - x0) < 4:
+        if abs(evento.x - x0) < 6:
             return
         if evento.x > self.lienzo.winfo_width() - 20:  # arrastrar contra el borde: avanzar la vista
             self._scroll_x("scroll", 1, "units")
@@ -636,8 +637,9 @@ class EditorMoldear(ttk.Frame):
             return
         _inicio, _pista, x0 = self._arrastre
         self._arrastre = None
-        if abs(evento.x - x0) < 4:  # fue un click: mover el cabezal y quitar la selección
-            self.mezclador.ir_a(self._muestra(evento.x))
+        if abs(evento.x - x0) < 6:
+            # Fue un click: solo quita la selección. NO mueve la música: al ir a seleccionar,
+            # un click sin querer cambiaba lo que sonaba. El cabezal se mueve desde la regla.
             self.seleccion = None
             self._dibujar_seleccion()
             self._actualizar_botones()
