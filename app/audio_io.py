@@ -46,6 +46,18 @@ class InfoAudio:
         return f"{bytes_totales:.1f} TB"
 
 
+MUESTREO_NATIVO = 44100  # todo el audio se lleva a esto (los filtros en C++ lo suponen)
+
+
+def es_wav_nativo(ruta):
+    """True si el archivo ya es WAV PCM 16 bits a 44100 Hz (se puede cargar sin convertir)."""
+    try:
+        with wave.open(ruta, "rb") as wf:
+            return wf.getsampwidth() == 2 and wf.getframerate() == MUESTREO_NATIVO and wf.getnchannels() in (1, 2)
+    except (wave.Error, EOFError, OSError):
+        return False  # p. ej. WAV en float o con cabecera extendida: que ffmpeg lo convierta
+
+
 def cargar_wav(ruta, limite_mb=200):
     """Carga un WAV y devuelve (info, izquierdo, derecho).
 
