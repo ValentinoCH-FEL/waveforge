@@ -16,7 +16,12 @@ Interfaces y Dispositivos Periféricos.
   - Demucs (modelo de 6 pistas) separa voz, batería, bajo, guitarra,
     piano y otros instrumentos.
   - Donde hay voz, un modelo karaoke (MDX-Net) la parte en **voz
-    principal** y **coros**.
+    principal** y **coros**. En Windows corre en la tarjeta gráfica
+    (DirectML: NVIDIA, AMD o Intel, también las integradas), ~3 veces más
+    rápido que en el procesador, y al mismo tiempo que Demucs.
+  - **Calidad alta** (menú Separación): la voz la saca Mel-Band RoFormer,
+    bastante más limpia que Demucs. Sin tarjeta NVIDIA es lenta (varias
+    veces lo que dura la canción); la primera vez descarga ~900 MB.
   - Solo aparecen las pistas que realmente suenan (si la canción no
     tiene coros o piano, esas pistas no se muestran).
   - Se procesa por trozos: los primeros segundos están listos en
@@ -97,11 +102,16 @@ Instálalo sin dependencias y agrega las que necesita a mano:
 
 ```
 pip install audio-separator --no-deps
-pip install audioop-lts "beartype>=0.22" einops julius librosa ml_collections onnx-weekly onnx2torch-py313 onnxruntime pydub pyyaml resampy "rotary-embedding-torch<0.7" samplerate==0.1.0 scipy soundfile audioread
+pip install audioop-lts "beartype>=0.22" einops julius librosa ml_collections onnx-weekly onnx2torch-py313 onnxruntime-directml pydub pyyaml resampy "rotary-embedding-torch<0.7" samplerate==0.1.0 scipy six soundfile audioread
 ```
 
+Sin tarjeta NVIDIA conviene instalar PyTorch en su versión solo-CPU
+(bastante más liviana) antes que el resto:
+`pip install torch --index-url https://download.pytorch.org/whl/cpu`.
+
 La primera vez que se separa una canción se descargan los modelos de
-IA (~100 MB) en `~/.cache/estudio_audio_modelos`.
+IA (~140 MB; ~900 MB más si usas la calidad alta) en
+`~/.cache/estudio_audio_modelos`.
 
 ### 3. Ejecutar
 
@@ -109,9 +119,28 @@ IA (~100 MB) en `~/.cache/estudio_audio_modelos`.
 python app/main.py
 ```
 
-Sin tarjeta gráfica NVIDIA, la separación completa tarda más o menos
-lo que dura la canción; con una NVIDIA (y PyTorch con CUDA) es varias
-veces más rápida, sin cambiar nada del código.
+## Qué PC hace falta
+
+Medido en un Ryzen 5 5600G (6 núcleos, gráficos Radeon integrados, sin
+NVIDIA) con 16 GB de RAM:
+
+| | Calidad rápida | Calidad alta (RoFormer) |
+|---|---|---|
+| Primeros segundos audibles | ~20 s | ~1-2 min |
+| Canción de 4 min completa | ~3 min (0.7-0.8x) | ~25 min (~6x) |
+| RAM usada por la IA | ~2.5 GB | ~3 GB |
+
+- **Mínimo:** procesador de 4 núcleos, 8 GB de RAM, ~3 GB libres de
+  disco (dependencias + modelos), Windows 10/11, macOS o Linux. Funciona,
+  pero la separación tarda más que la canción.
+- **Recomendado:** 6 núcleos o más y 16 GB de RAM; en Windows, cualquier
+  tarjeta gráfica (aunque sea integrada) acelera el karaoke.
+- **Ideal:** tarjeta NVIDIA con 6 GB o más de memoria y PyTorch con CUDA:
+  la separación es varias veces más rápida que la canción y la calidad
+  alta se vuelve práctica, sin cambiar nada del código.
+
+Convertir el archivo no es lo lento: ffmpeg pasa una canción de 4 min a
+WAV en ~0.2 s. El tiempo se va en la separación con IA.
 
 ## Cómo agregar un filtro nuevo (pensado para escalar)
 
