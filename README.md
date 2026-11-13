@@ -29,8 +29,14 @@ Interfaces y Dispositivos Periféricos.
     puede escuchar y editar.
   - Las últimas 5 canciones separadas quedan en caché: volver a
     cargarlas es instantáneo.
+- Dos pestañas: **Separación con IA** (cargar la canción, elegir la
+  calidad, ver el avance) y **Estudio**, que se abre solo cuando la
+  separación termina.
 - Mezcla en vivo: volumen, silenciar (M) y solo (S) por pista, sin
   cortar el sonido.
+- Siempre se ve la canción completa, con una barra de reproducción que
+  avanza mientras suena y que se puede clickear o arrastrar para saltar.
+  Reproducir, Original (sigue en el mismo segundo), Pausa y Detener.
 - Efectos por pista, calculados por la librería nativa en C++:
   **pasa-bajos**, **pasa-altos**, **normalización** y **limpiar ruido
   de fondo** (noise gate).
