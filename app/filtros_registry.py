@@ -4,9 +4,9 @@ filtros_registry.py — catálogo de filtros disponibles.
 Esta es la pieza que hace que el proyecto sea escalable: para agregar
 un filtro nuevo solo hace falta:
   1. Escribir la función en native/filtros/<nombre>.cpp con la firma
-     común (entrada, salida, cantidad, parametro) y declararla en
-     filtro.h.
-  2. Agregar una entrada aquí.
+     común (entrada, salida, cantidad, parametro), declararla en
+     filtro.h y recompilar (los build_* toman todos los .cpp solos).
+  2. Agregar una entrada aquí ("funcion_nativa" = nombre de la función).
 Nada en main.py ni en motor.py necesita cambiar.
 
 Cada parámetro puede indicar "unidad" y "decimales" para mostrar su valor
@@ -17,14 +17,12 @@ FILTROS = {
     "ninguno": {
         "etiqueta": "Sin efecto",
         "descripcion": "La pista suena tal cual, sin ningún filtro.",
-        "tipo": "ninguno",
         "funcion_nativa": None,
         "parametro": None,
     },
     "pasa_bajos": {
         "etiqueta": "Pasa-bajos (suavizar)",
         "descripcion": "Atenúa frecuencias altas; suaviza el audio.",
-        "tipo": "mono",
         "funcion_nativa": "pasa_bajos",
         "parametro": {
             "nombre": "Suavizado (alpha)",
@@ -38,7 +36,6 @@ FILTROS = {
     "pasa_altos": {
         "etiqueta": "Pasa-altos (realzar agudos)",
         "descripcion": "Atenúa frecuencias bajas; realza los agudos.",
-        "tipo": "mono",
         "funcion_nativa": "pasa_altos",
         "parametro": {
             "nombre": "Suavizado (alpha)",
@@ -52,7 +49,6 @@ FILTROS = {
     "normalizar": {
         "etiqueta": "Normalización de volumen",
         "descripcion": "Escala el audio para que su pico llegue al nivel objetivo.",
-        "tipo": "mono",
         "funcion_nativa": "normalizar",
         "parametro": {
             "nombre": "Nivel objetivo (pico)",
@@ -70,7 +66,6 @@ FILTROS = {
             "con transición suave. No quita ruido mientras suena algo fuerte. "
             "Súbelo hasta que el ruido desaparezca; si se oye cortado, bájalo."
         ),
-        "tipo": "mono",
         "funcion_nativa": "ruido_gate",
         "parametro": {
             "nombre": "Umbral",

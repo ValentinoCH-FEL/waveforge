@@ -55,18 +55,28 @@ class MotorAudio:
         except OSError as error:
             raise ErrorMotor(f"No se pudo cargar la librería nativa:\n{error}")
 
-        self._declarar_firmas()
+        self._funciones = {}
 
-    def _declarar_firmas(self):
-        for nombre in ("pasa_bajos", "pasa_altos", "normalizar", "ruido_gate"):
-            fn = getattr(self.lib, nombre)
+    def _funcion(self, nombre):
+        """Busca el filtro en la librería y le declara la firma común la primera vez que se usa.
+        Así un filtro nuevo no hay que anotarlo aquí: basta con que exista en la librería."""
+        fn = self._funciones.get(nombre)
+        if fn is None:
+            try:
+                fn = getattr(self.lib, nombre)
+            except AttributeError:
+                raise ErrorMotor(
+                    f"La librería nativa no tiene la función '{nombre}'. "
+                    "¿Recompilaste native/ después de agregar el filtro?"
+                )
             fn.argtypes = [_FLOAT_ARRAY, _FLOAT_ARRAY, ctypes.c_int, ctypes.c_float]
             fn.restype = None
+            self._funciones[nombre] = fn
+        return fn
 
     def aplicar_mono(self, nombre_funcion, muestras, parametro):
         """Llama un filtro de la firma común (entrada, salida, n, parametro)."""
         entrada = np.ascontiguousarray(muestras, dtype=np.float32)
         salida = np.empty_like(entrada)
-        fn = getattr(self.lib, nombre_funcion)
-        fn(entrada, salida, entrada.shape[0], np.float32(parametro))
+        self._funcion(nombre_funcion)(entrada, salida, entrada.shape[0], np.float32(parametro))
         return salida
