@@ -1,9 +1,9 @@
 """
 main.py — ventana principal (Tkinter), con tres pestañas:
 
-  1. Moldear: editor de pistas en línea de tiempo (editor.py).
-  2. Separación con IA: cargar la canción (archivo o enlace), elegir la calidad
-     y ver el avance. Al terminar, la canción separada se abre sola en Moldear.
+  1. Separación con IA: cargar la canción o el video (archivo o enlace), elegir la
+     calidad y ver el avance. Al terminar, se abre sola en Moldear.
+  2. Moldear: editor de pistas en línea de tiempo (editor.py).
   3. DJ: modo DJ privado (por ahora solo la pestaña; viene después).
 """
 
@@ -67,6 +67,7 @@ class AppEstudioAudio:
 
         # Separación con IA
         self.var_calidad = tk.StringVar(value="rapida")  # clave de separador.CALIDADES
+        self.var_publico = tk.BooleanVar(value=False)    # modo concierto: separar al público
         self._separando = False
         self._progreso = (0, 1)
         self._inicio_separacion = 0.0
@@ -84,9 +85,10 @@ class AppEstudioAudio:
                                            al_pedir_cancion=lambda: self.pestanas.select(self.tab_ia))
         self.tab_ia = ttk.Frame(self.pestanas)
         self.tab_dj = ttk.Frame(self.pestanas)
-        self.pestanas.add(self.editor, text="  🎚  Moldear  ")
-        self.pestanas.add(self.tab_ia, text="  ✦  Separación con IA  ")
-        self.pestanas.add(self.tab_dj, text="  🎧  DJ  ")
+        # Primero se sube y separa la canción; después se moldea.
+        self.pestanas.add(self.tab_ia, text="  ✦  1 · Separación con IA  ")
+        self.pestanas.add(self.editor, text="  🎚  2 · Moldear  ")
+        self.pestanas.add(self.tab_dj, text="  🎧  3 · DJ  ")
 
         self._construir_pestana_ia()
         self._construir_pestana_dj()
@@ -222,6 +224,21 @@ class AppEstudioAudio:
             foreground=COLOR_TEXTO_SUAVE, wraplength=980, justify="left",
         ).pack(anchor="w", padx=12, pady=(6, 10))
 
+        marco_tipo = ttk.LabelFrame(cuerpo, text="¿Es un concierto o una grabación en vivo?")
+        marco_tipo.pack(fill="x", pady=(0, 12))
+        ttk.Checkbutton(
+            marco_tipo, text="🎤  Modo concierto: separar al público de la voz del cantante",
+            variable=self.var_publico, command=self._cambiar_calidad,
+        ).pack(anchor="w", padx=12, pady=(8, 0))
+        ttk.Label(
+            marco_tipo,
+            text="Para videos de conciertos donde la gente canta, grita o aplaude. La gente queda en su propia "
+                 "pista «Público» y la «Voz principal» queda solo con el cantante. Para dejar solo su voz: "
+                 "en Moldear, botón S (solo) de «Voz principal», y exportar. Funciona mejor cuando el cantante "
+                 "suena por encima del público; si todos cantan igual de fuerte, algo de público se cuela.",
+            foreground=COLOR_TEXTO_SUAVE, wraplength=980, justify="left",
+        ).pack(anchor="w", padx=12, pady=(4, 10))
+
         marco_avance = ttk.LabelFrame(cuerpo, text="Avance")
         marco_avance.pack(fill="x", pady=(0, 12))
         self._etiqueta_progreso = ttk.Label(marco_avance, text="Esperando una canción.",
@@ -347,7 +364,7 @@ class AppEstudioAudio:
     # ---------- separación (arranca sola al cargar la canción) ----------
 
     def _cambiar_calidad(self):
-        """Otra calidad elegida: si hay una canción cargada, se vuelve a separar con ella."""
+        """Otra calidad o modo concierto: si hay una canción cargada, se vuelve a separar."""
         if self.info is not None:
             self._iniciar_separacion()
 
@@ -375,22 +392,22 @@ class AppEstudioAudio:
 
         threading.Thread(
             target=self._separar_en_hilo,
-            args=(self._sesion, self.izquierdo, self.derecho, self.info.muestreo, calidad),
+            args=(self._sesion, self.izquierdo, self.derecho, self.info.muestreo, calidad, self.var_publico.get()),
             daemon=True,
         ).start()
 
-    def _separar_en_hilo(self, sesion, izquierdo, derecho, muestreo, calidad):
+    def _separar_en_hilo(self, sesion, izquierdo, derecho, muestreo, calidad, publico):
         def avance(_pistas, hecho, total):
             self.root.after(0, lambda: self._on_avance_separacion(sesion, hecho, total))
 
         try:
-            clave = separador.clave_audio(izquierdo, derecho, muestreo, calidad)
+            clave = separador.clave_audio(izquierdo, derecho, muestreo, calidad, publico)
             pistas = separador.cargar_de_cache(clave)
             desde_cache = pistas is not None
             if not desde_cache:
                 pistas = separador.separar_por_partes(
                     izquierdo, derecho, muestreo, al_avanzar=avance,
-                    cancelado=lambda: sesion != self._sesion, calidad=calidad,
+                    cancelado=lambda: sesion != self._sesion, calidad=calidad, publico=publico,
                 )
                 if pistas is None:
                     return  # cancelada: otra canción u otra calidad
