@@ -59,65 +59,58 @@ Interfaces y Dispositivos Periféricos.
 │   ├── audio_io.py           # cargar/guardar/validar WAV
 │   ├── graficas.py           # ondas de cada pista (matplotlib)
 │   └── tema.py               # colores y estilos de la interfaz
+├── iniciar.bat / iniciar.sh  # doble clic: instala lo que falte y abre la app
 ├── requirements.txt
 └── README.md
 ```
 
 ## Cómo correrlo
 
-### 1. Compilar el motor nativo (una sola vez por plataforma)
+**Windows:** doble clic en `iniciar.bat`. **Mac/Linux:** `./iniciar.sh`.
 
-Necesitas un compilador de C++. En Windows, instala MinGW vía
-[MSYS2](https://www.msys2.org/) (`pacman -S mingw-w64-ucrt-x86_64-gcc`)
-y agrega su `bin` al PATH. En Mac ya viene con las Command Line Tools
-de Xcode (`xcode-select --install`). En Linux instala `g++` con el
-gestor de paquetes de tu distro.
+La primera vez prepara todo solo (tarda varios minutos) y después solo
+abre la app:
 
-Luego corre el script de tu sistema, que está en `native/`:
+1. Crea un entorno de Python en `.venv` dentro de la carpeta del proyecto.
+2. Instala las dependencias de `requirements.txt`. Vuelve a hacerlo solo
+   cuando ese archivo cambia (por ejemplo, tras un `git pull`).
+3. Compila el motor de filtros en C++ si todavía no está compilado.
+4. Si falta ffmpeg, ofrece instalarlo con `winget` (en Mac/Linux, avisa
+   cómo instalarlo).
 
-- Windows: `build_windows.bat`
-- Mac: `./build_mac.sh`
-- Linux: `./build_linux.sh`
-
-Cada uno genera el archivo correspondiente (`filtro.dll`,
-`libfiltro.dylib` o `libfiltro.so`) **dentro de `native/`** — ahí es
-donde `motor.py` lo busca.
-
-### 2. Instalar las dependencias
-
-```
-pip install -r requirements.txt
-```
-
-También hace falta **ffmpeg** (para convertir archivos y descargar de
-YouTube): en Windows, `winget install ffmpeg`.
-
-Tkinter viene incluido con Python en Windows y Mac. En Linux puede que
-necesites instalarlo aparte (`sudo apt install python3-tk` en
-Debian/Ubuntu).
-
-**Python 3.14 en Windows:** `audio-separator` pide `diffq-fixed`, que
-no compila en esa versión, y `beartype<0.19`, que no funciona en ella.
-Instálalo sin dependencias y agrega las que necesita a mano:
-
-```
-pip install audio-separator --no-deps
-pip install audioop-lts "beartype>=0.22" einops julius librosa ml_collections onnx-weekly onnx2torch-py313 onnxruntime-directml pydub pyyaml resampy "rotary-embedding-torch<0.7" samplerate==0.1.0 scipy six soundfile audioread
-```
-
-Sin tarjeta NVIDIA conviene instalar PyTorch en su versión solo-CPU
-(bastante más liviana) antes que el resto:
-`pip install torch --index-url https://download.pytorch.org/whl/cpu`.
+yt-dlp (descargas de YouTube) se mantiene al día solo: la app lo revisa
+una vez al día en segundo plano, porque YouTube cambia seguido y las
+versiones viejas dejan de descargar.
 
 La primera vez que se separa una canción se descargan los modelos de
 IA (~140 MB; ~900 MB más si usas la calidad alta) en
 `~/.cache/estudio_audio_modelos`.
 
-### 3. Ejecutar
+### Lo que el script no instala
+
+- **Python 3.11 o más nuevo** (probado con 3.14):
+  https://www.python.org/downloads/ o `winget install Python.Python.3.14`.
+  En Linux puede hacer falta Tkinter aparte (`sudo apt install python3-tk`).
+- **Compilador de C++**, solo para compilar el motor la primera vez. En
+  Windows, MinGW vía [MSYS2](https://www.msys2.org/)
+  (`pacman -S mingw-w64-ucrt-x86_64-gcc`), agregando `C:\msys64\ucrt64\bin`
+  al PATH. En Mac viene con `xcode-select --install`; en Linux, `g++`.
+  Sin compilador la app abre igual, pero sin efectos.
+
+### A mano (sin los scripts)
 
 ```
+python -m venv .venv
+.venv\Scripts\activate          (Mac/Linux: source .venv/bin/activate)
+pip install -r requirements.txt
+pip install --no-deps audio-separator
+native\build_windows.bat        (o native/build_mac.sh, native/build_linux.sh)
 python app/main.py
 ```
+
+`audio-separator` va con `--no-deps` porque sus dependencias declaradas
+no instalan en Python 3.14 (`diffq-fixed` no compila y pide
+`beartype<0.19`); `requirements.txt` ya lista las que de verdad necesita.
 
 ## Qué PC hace falta
 
