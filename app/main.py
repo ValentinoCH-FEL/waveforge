@@ -109,6 +109,7 @@ class AppEstudioAudio:
 
         # Mientras el usuario elige o descarga la canción, se cargan los modelos de IA.
         threading.Thread(target=separador.precargar_modelos, daemon=True).start()
+        importador.actualizar_yt_dlp_en_segundo_plano()  # YouTube cambia seguido
 
     # ---------- utilidades comunes ----------
 
