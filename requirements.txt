@@ -8,5 +8,7 @@ soundfile
 torch
 demucs-infer
 audio-separator
-onnxruntime
+# El modelo karaoke usa la tarjeta gráfica en Windows (DirectML: NVIDIA, AMD o Intel)
+onnxruntime-directml; sys_platform == "win32"
+onnxruntime; sys_platform != "win32"
 librosa
