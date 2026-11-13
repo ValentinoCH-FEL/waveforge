@@ -9,40 +9,57 @@ Interfaces y Dispositivos Periféricos.
 
 ## Qué hace
 
-- Carga un archivo de audio o video (WAV, MP3, M4A, OGG, FLAC...) o
-  descarga el audio de un enlace de YouTube. Máximo 10 minutos por
-  canción.
-- **Separa la canción automáticamente** al cargarla:
-  - Demucs (modelo de 6 pistas) separa voz, batería, bajo, guitarra,
-    piano y otros instrumentos.
-  - Donde hay voz, un modelo karaoke (MDX-Net) la parte en **voz
-    principal** y **coros**. En Windows corre en la tarjeta gráfica
-    (DirectML: NVIDIA, AMD o Intel, también las integradas), ~3 veces más
-    rápido que en el procesador, y al mismo tiempo que Demucs.
-  - **Calidad alta** (menú Separación): la voz la saca Mel-Band RoFormer,
-    bastante más limpia que Demucs. Sin tarjeta NVIDIA es lenta (varias
-    veces lo que dura la canción); la primera vez descarga ~900 MB.
-  - Solo aparecen las pistas que realmente suenan (si la canción no
-    tiene coros o piano, esas pistas no se muestran).
-  - Se procesa por trozos: los primeros segundos están listos en
-    ~20 s y el resto se completa en segundo plano mientras ya se
-    puede escuchar y editar.
-  - Las últimas 5 canciones separadas quedan en caché: volver a
-    cargarlas es instantáneo.
-- Dos pestañas: **Separación con IA** (cargar la canción, elegir la
-  calidad, ver el avance) y **Estudio**, que se abre solo cuando la
-  separación termina.
-- Mezcla en vivo: volumen, silenciar (M) y solo (S) por pista, sin
-  cortar el sonido.
-- Siempre se ve la canción completa, con una barra de reproducción que
-  avanza mientras suena y que se puede clickear o arrastrar para saltar.
-  Reproducir, Original (sigue en el mismo segundo), Pausa y Detener.
-- Efectos por pista, calculados por la librería nativa en C++:
-  **pasa-bajos**, **pasa-altos**, **normalización** y **limpiar ruido
-  de fondo** (noise gate).
-- Grafica las ondas de cada pista, reproduce la mezcla o el original,
-  y exporta la mezcla o cada pista por separado como WAV.
-- Guarda un registro (`registro.log`) de lo que se hizo y cuándo.
+Tres pestañas:
+
+**1. Moldear** — editor de pistas en línea de tiempo:
+- Cada pista en su carril, con volumen, M (silenciar), S (solo), tamaño
+  del carril y eliminar.
+- Zoom animado (Ctrl+rueda o botones), moverse en el tiempo
+  (Shift+rueda o la barra de abajo), cabezal de reproducción, reloj y
+  vúmetro estéreo.
+- Arrastrando sobre una o varias pistas se elige un **tramo**, y solo a
+  ese tramo se le aplica: subir/bajar volumen, silenciar, fade in/out o
+  un efecto: **ecualizador de graves, medios y agudos**, pasa-bajos,
+  pasa-altos, normalización o limpiar ruido. Todos los efectos corren en
+  el motor nativo en C++.
+- Las ediciones no tocan el audio original: deshacer/rehacer (Ctrl+Z /
+  Ctrl+Y) es exacto. Cada tramo editado queda marcado en su carril.
+- A/B: escuchar la canción original en el mismo segundo, para comparar.
+- Exporta la mezcla o cada pista (con sus ediciones) como WAV.
+
+**2. Separación con IA** — carga un archivo de audio o video (WAV, MP3,
+M4A, OGG, FLAC...) o un enlace de YouTube, de hasta 10 minutos, y lo
+separa:
+- Demucs (modelo de 6 pistas) separa voz, batería, bajo, guitarra,
+  piano y otros instrumentos.
+- Donde hay voz, un modelo karaoke (MDX-Net) la parte en **voz
+  principal** y **coros**. En Windows corre en la tarjeta gráfica
+  (DirectML: NVIDIA, AMD o Intel, también las integradas), ~3 veces más
+  rápido que en el procesador, y al mismo tiempo que Demucs.
+- **Calidad alta**: la voz la saca Mel-Band RoFormer, bastante más
+  limpia que Demucs. Sin tarjeta NVIDIA es lenta (varias veces lo que
+  dura la canción); la primera vez descarga ~900 MB.
+- Solo aparecen las pistas que realmente suenan. Al terminar, la
+  canción se abre sola en Moldear. Las últimas 5 canciones separadas
+  quedan en caché: volver a cargarlas es instantáneo.
+
+**3. DJ** — por ahora solo la pestaña: aquí irá el modo DJ privado.
+
+Guarda un registro (`registro.log`) de lo que se hizo y cuándo.
+
+### Atajos de Moldear
+
+| Tecla | Acción |
+|---|---|
+| Espacio | Reproducir / pausa |
+| Arrastrar sobre las pistas | Elegir un tramo (hacia arriba/abajo abarca más pistas) |
+| Doble click en una pista | Elegirla entera |
+| Ctrl+A / Esc | Elegir todo / quitar la selección |
+| Supr | Silenciar el tramo |
+| Ctrl+Z / Ctrl+Y | Deshacer / rehacer |
+| Ctrl+rueda, + / − | Zoom |
+| Shift+rueda | Moverse en el tiempo |
+| Inicio | Volver al principio |
 
 ## Estructura
 
@@ -55,7 +72,10 @@ Interfaces y Dispositivos Periféricos.
 │   ├── build_mac.sh          # genera libfiltro.dylib
 │   └── build_linux.sh        # genera libfiltro.so
 ├── app/                     # interfaz en Python
-│   ├── main.py               # ventana Tkinter
+│   ├── main.py               # ventana y pestañas; Separación con IA
+│   ├── editor.py             # pestaña Moldear: carriles, zoom, tramos, deshacer
+│   ├── ediciones.py          # ediciones por tramo (sin Tk) + resumen de ondas
+│   ├── widgets.py            # botones animados, vúmetro, ayudas
 │   ├── separador.py          # separación con IA por trozos + caché
 │   ├── importador.py         # convertir archivos (ffmpeg) y descargar de YouTube (yt-dlp)
 │   ├── reproductor.py        # mezclador en vivo (sounddevice)
@@ -63,7 +83,6 @@ Interfaces y Dispositivos Periféricos.
 │   ├── motor.py              # wrapper ctypes (carga la lib según el SO)
 │   ├── filtros_registry.py   # catálogo de filtros disponibles
 │   ├── audio_io.py           # cargar/guardar/validar WAV
-│   ├── graficas.py           # ondas de cada pista (matplotlib)
 │   └── tema.py               # colores y estilos de la interfaz
 ├── iniciar.bat / iniciar.sh  # doble clic: instala lo que falte y abre la app
 ├── requirements.txt
