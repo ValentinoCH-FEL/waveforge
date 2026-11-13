@@ -30,7 +30,7 @@ import separador
 import tema
 from motor import ErrorMotor, MotorAudio
 
-NOMBRE_APP = "Estudio de Audio"
+NOMBRE_APP = "Waveforge"
 RAIZ_PROYECTO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ARCHIVO_LOG = os.path.join(RAIZ_PROYECTO, "registro.log")
 
@@ -178,8 +178,8 @@ class AppEstudioAudio:
     def _acerca_de(self):
         messagebox.showinfo(
             NOMBRE_APP,
-            f"{NOMBRE_APP}\nMotor de filtros en C++ (ctypes) + Python/Tkinter.\n"
-            "Proyecto del curso Programación de Interfaces y Dispositivos Periféricos.",
+            f"{NOMBRE_APP} — estudio de audio con separación de pistas por IA.\n"
+            "Motor de filtros en C++ (ctypes) + Python/Tkinter.",
         )
 
     # ---------- Paso 1: cargar archivo ----------
