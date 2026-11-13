@@ -1,14 +1,37 @@
+# Dependencias de Waveforge. No hace falta instalarlas a mano: iniciar.bat (Windows)
+# o iniciar.sh (Mac/Linux) crean el entorno .venv y las instalan solas.
 numpy
 matplotlib
 sounddevice
-yt-dlp
 soundfile
+# Descargar de YouTube u otros sitios. La app lo actualiza sola una vez al día.
+yt-dlp
 
 # Separación con IA (Demucs + modelo karaoke para voz principal/coros)
 torch
 demucs-infer
-audio-separator
+librosa
 # El modelo karaoke usa la tarjeta gráfica en Windows (DirectML: NVIDIA, AMD o Intel)
 onnxruntime-directml; sys_platform == "win32"
 onnxruntime; sys_platform != "win32"
-librosa
+
+# audio-separator se instala aparte con --no-deps (lo hacen los scripts iniciar.*):
+# sus dependencias declaradas no instalan en Python 3.14 (diffq-fixed no compila y
+# pide beartype<0.19, que no funciona). Estas son las que realmente necesita:
+audioop-lts; python_version >= "3.13"
+beartype>=0.22
+einops
+julius
+ml_collections
+onnx-weekly
+onnx2torch-py313
+pydub
+pyyaml
+requests
+resampy
+rotary-embedding-torch<0.7
+samplerate==0.1.0
+scipy
+six
+tqdm
+audioread
