@@ -33,7 +33,7 @@ def aplicar(root):
 
     root.configure(bg=FONDO)
 
-    # --- widgets clásicos de Tk (menús, cuadros de texto, diálogos, barra de matplotlib) ---
+    # --- widgets clásicos de Tk (menús, cuadros de texto, diálogos) ---
     opciones = {
         "*Background": FONDO,
         "*Foreground": TEXTO,
