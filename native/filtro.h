@@ -24,4 +24,9 @@ FILTRO_API void normalizar(float* entrada, float* salida, int cantidad, float ni
 // de fondo de bajo nivel / "sonidos externos" leves).
 FILTRO_API void ruido_gate(float* entrada, float* salida, int cantidad, float umbral);
 
+// Ecualizador de 3 bandas (parámetro: ganancia en dB, + realza / - atenúa).
+FILTRO_API void graves(float* entrada, float* salida, int cantidad, float db);
+FILTRO_API void medios(float* entrada, float* salida, int cantidad, float db);
+FILTRO_API void agudos(float* entrada, float* salida, int cantidad, float db);
+
 #endif
