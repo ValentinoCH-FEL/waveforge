@@ -1,7 +1,6 @@
 # Dependencias de Waveforge. No hace falta instalarlas a mano: iniciar.bat (Windows)
 # o iniciar.sh (Mac/Linux) crean el entorno .venv y las instalan solas.
 numpy
-matplotlib
 sounddevice
 soundfile
 # Descargar de YouTube u otros sitios. La app lo actualiza sola una vez al día.
