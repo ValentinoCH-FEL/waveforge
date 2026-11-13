@@ -4,6 +4,6 @@
 set -e
 cd "$(dirname "$0")"
 
-clang++ -shared -fPIC -o libfiltro.dylib filtros/pasa_bajos.cpp filtros/pasa_altos.cpp filtros/normalizacion.cpp filtros/ruido_gate.cpp
+clang++ -shared -fPIC -o libfiltro.dylib -O2 filtros/*.cpp
 
 echo "Listo: libfiltro.dylib generado."
