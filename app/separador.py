@@ -4,8 +4,12 @@ separador.py — separa una canción en pistas (voz principal, coros e instrumen
 Cómo funciona:
   1. Demucs (de Meta, modelo de 6 pistas) separa voz, batería, bajo, guitarra,
      piano y otros instrumentos.
+     En calidad "alta", la voz la saca antes Mel-Band RoFormer (separa la voz
+     bastante más limpia) y Demucs solo reparte el resto entre los instrumentos.
   2. Donde hay voz, un modelo "karaoke" (MDX-Net, paquete audio-separator) la parte
      en voz principal y coros. Los trozos sin voz se saltan (ahorra tiempo).
+     Este modelo es ONNX: en Windows corre en la tarjeta gráfica (DirectML, también
+     Radeon e Intel), ~3 veces más rápido que en el procesador y sin ocuparlo.
   3. Solo se muestran las pistas que realmente se escuchan: si la canción no tiene
      coros o piano, esas pistas no aparecen.
 
@@ -21,12 +25,16 @@ import hashlib
 import importlib.util
 import logging
 import os
+import queue
 import tempfile
 import threading
 
 import numpy as np
 
 import tema
+
+# audio-separator dibuja barras de progreso (tqdm) en la terminal por cada trozo: solo ensucian.
+os.environ.setdefault("TQDM_DISABLE", "1")
 
 
 class ErrorSeparacion(Exception):
@@ -45,6 +53,19 @@ DURACION_MAXIMA_S = 10 * 60  # canciones más largas se rechazan al cargarlas
 
 _MODELO_DEMUCS = "htdemucs_6s"
 _MODELO_KARAOKE = "UVR_MDXNET_KARA_2.onnx"
+_MODELO_VOZ_ALTA = "vocals_mel_band_roformer.ckpt"  # ~900 MB, se descarga la primera vez que se usa
+
+# "rapida": Demucs saca la voz. "alta": RoFormer saca la voz (mejor, pero sin tarjeta
+# NVIDIA tarda varias veces lo que dura la canción).
+CALIDADES = {
+    "rapida": "Rápida (Demucs)",
+    "alta": "Alta (RoFormer) — lenta sin tarjeta NVIDIA",
+}
+
+# Hilos para la IA: uno menos que los núcleos físicos (os.cpu_count() cuenta los lógicos,
+# normalmente el doble). Usar todos los lógicos casi no acelera y deja sin CPU a la
+# interfaz y al audio en vivo: eso era lo que lo hacía trabarse.
+_HILOS_IA = max(1, (os.cpu_count() or 4) // 2 - 1)
 _CARPETA_MODELOS = os.path.join(os.path.expanduser("~"), ".cache", "estudio_audio_modelos")
 _CARPETA_CACHE = os.path.join(os.path.expanduser("~"), ".cache", "estudio_audio_cache")
 _CANCIONES_EN_CACHE = 5
@@ -105,7 +126,8 @@ def _db(valor, referencia):
 
 _candado_modelos = threading.Lock()
 _demucs = None
-_karaoke = None  # (separador, muestreo, carpeta de trabajo)
+_karaoke = None   # (separador, muestreo, carpeta de trabajo)
+_voz_alta = None  # (separador, muestreo, carpeta de trabajo)
 
 
 def _obtener_demucs():
@@ -114,33 +136,63 @@ def _obtener_demucs():
     from demucs_infer import DemucsSeparator
 
     if _demucs is None:
-        # Deja dos hilos libres: uno para la interfaz y otro para el audio en vivo.
-        torch.set_num_threads(max(1, (os.cpu_count() or 3) - 2))
+        torch.set_num_threads(_HILOS_IA)
         dispositivo = "cuda" if torch.cuda.is_available() else "cpu"
         _demucs = DemucsSeparator(model=_MODELO_DEMUCS, device=dispositivo, overlap=0.1)
     return _demucs
 
 
-def _obtener_karaoke(muestreo):
-    global _karaoke
+def _proveedores_onnx():
+    """Dónde corre el modelo ONNX: tarjeta NVIDIA (CUDA), cualquier tarjeta en Windows
+    (DirectML, paquete onnxruntime-directml) o, si no hay, el procesador."""
+    import onnxruntime
+
+    disponibles = onnxruntime.get_available_providers()
+    preferidos = [p for p in ("CUDAExecutionProvider", "DmlExecutionProvider") if p in disponibles]
+    return preferidos[:1] + ["CPUExecutionProvider"]
+
+
+def _crear_separador(modelo, muestreo, prefijo, **parametros):
+    """Un Separator de audio-separator que deja solo la voz en una carpeta temporal propia."""
     from audio_separator.separator import Separator
 
+    carpeta = tempfile.mkdtemp(prefix=prefijo)
+    separador = Separator(
+        log_level=logging.WARNING,
+        model_file_dir=_CARPETA_MODELOS,
+        output_dir=carpeta,
+        output_format="WAV",
+        output_single_stem="Vocals",
+        normalization_threshold=1.0,  # no cambiar el volumen: la pista se mezcla con las demás
+        sample_rate=muestreo,
+        **parametros,
+    )
+    # audio-separator solo activa DirectML si además está torch-directml (no existe para
+    # Python 3.14); para un modelo ONNX basta con onnxruntime-directml, así que se elige aquí.
+    if modelo.endswith(".onnx"):
+        separador.onnx_execution_provider = _proveedores_onnx()
+    separador.load_model(model_filename=modelo)
+    return separador, muestreo, carpeta
+
+
+def _obtener_karaoke(muestreo):
+    global _karaoke
     if _karaoke is None or _karaoke[1] != muestreo:
-        carpeta = tempfile.mkdtemp(prefix="estudio_audio_karaoke_")
-        separador = Separator(
-            log_level=logging.WARNING,
-            model_file_dir=_CARPETA_MODELOS,
-            output_dir=carpeta,
-            output_format="WAV",
-            output_single_stem="Vocals",
-            normalization_threshold=1.0,  # no cambiar el volumen: la pista se mezcla con las demás
-            sample_rate=muestreo,
+        _karaoke = _crear_separador(
+            _MODELO_KARAOKE, muestreo, "estudio_audio_karaoke_",
             # overlap 0.1 en vez de 0.25: ~11 % más rápido, diferencia inaudible (-36 dB).
             mdx_params={"hop_length": 1024, "segment_size": 256, "overlap": 0.1, "batch_size": 1, "enable_denoise": False},
         )
-        separador.load_model(model_filename=_MODELO_KARAOKE)
-        _karaoke = (separador, muestreo, carpeta)
     return _karaoke
+
+
+def _obtener_voz_alta(muestreo):
+    global _voz_alta
+    if _voz_alta is None or _voz_alta[1] != muestreo:
+        import torch
+        torch.set_num_threads(_HILOS_IA)
+        _voz_alta = _crear_separador(_MODELO_VOZ_ALTA, muestreo, "estudio_audio_roformer_")
+    return _voz_alta
 
 
 def precargar_modelos(muestreo=44100):
@@ -180,17 +232,18 @@ def _separar_demucs(onda, muestreo):
     return resultado
 
 
-def _voz_principal(voz, muestreo):
-    """voz: [2, n]. Devuelve la voz principal [2, n] (los coros son voz - principal)."""
+def _sacar_voz(modelo, audio, muestreo):
+    """Pasa audio ([2, n]) por un modelo de audio-separator y devuelve solo su voz [2, n].
+    modelo: tupla de _obtener_karaoke o _obtener_voz_alta."""
     import soundfile as sf
 
-    separador, _sr, carpeta = _obtener_karaoke(muestreo)
-    entrada = os.path.join(carpeta, "voz.wav")
-    sf.write(entrada, voz.T, muestreo, subtype="FLOAT")
+    separador, _sr, carpeta = modelo
+    entrada = os.path.join(carpeta, "entrada.wav")
+    sf.write(entrada, audio.T, muestreo, subtype="FLOAT")
     try:
-        salidas = separador.separate(entrada, custom_output_names={"Vocals": "principal"})
+        salidas = separador.separate(entrada, custom_output_names={"Vocals": "voz"})
         if not salidas:
-            raise ErrorSeparacion("El modelo karaoke no devolvió la voz principal.")
+            raise ErrorSeparacion("El modelo de voz no devolvió ningún resultado.")
         ruta = salidas[0] if os.path.isabs(salidas[0]) else os.path.join(carpeta, salidas[0])
         principal, _ = sf.read(ruta, dtype="float32", always_2d=True)
     finally:
@@ -200,10 +253,21 @@ def _voz_principal(voz, muestreo):
             except OSError:
                 pass
 
-    principal = _ajustar_largo(np.ascontiguousarray(principal.T), voz.shape[1])
+    principal = _ajustar_largo(np.ascontiguousarray(principal.T), audio.shape[1])
     if principal.shape[0] == 1:
         principal = np.repeat(principal, 2, axis=0)
     return principal
+
+
+def _separar_trozo(audio, muestreo, calidad):
+    """audio: [2, n]. Devuelve {id_pista o "voz": [2, n]} con la voz completa en "voz"."""
+    if calidad != "alta":
+        return _separar_demucs(audio, muestreo)
+    voz = _sacar_voz(_obtener_voz_alta(muestreo), audio, muestreo)
+    # Demucs reparte lo que no es voz; su propia "voz" (restos) se descarta.
+    partes = _separar_demucs(np.ascontiguousarray(audio - voz), muestreo)
+    partes["voz"] = voz
+    return partes
 
 
 # ---------- separación por trozos ----------
@@ -220,8 +284,8 @@ def _escribir(destino, nuevo, inicio, fundido):
     destino[:, inicio + f:inicio + k] = nuevo[:, f:]
 
 
-def separar_por_partes(izquierdo, derecho, muestreo, al_avanzar=None, cancelado=None):
-    """Separa la canción en trozos, del inicio al final.
+def separar_por_partes(izquierdo, derecho, muestreo, al_avanzar=None, cancelado=None, calidad="rapida"):
+    """Separa la canción en trozos, del inicio al final. calidad: una clave de CALIDADES.
 
     Tras cada trozo llama al_avanzar(pistas, muestras_procesadas, muestras_totales), donde
     pistas son las que ya se escuchan (sus arreglos se siguen llenando con los trozos
@@ -248,39 +312,77 @@ def separar_por_partes(izquierdo, derecho, muestreo, al_avanzar=None, cancelado=
     energia_cancion = 0.0
     rms_cancion = _rms(original)
 
-    with _candado_modelos:
-        for k, inicio in enumerate(inicios):
-            if cancelado and cancelado():
-                return None
-            fin = inicios[k + 1] if k + 1 < len(inicios) else n
-            desde, hasta = max(0, inicio - contexto), min(n, fin + contexto)
+    # Dos etapas en paralelo: este hilo separa los instrumentos del trozo k (CPU) mientras
+    # otro hilo saca voz principal y coros del trozo k-1 (en la tarjeta gráfica si hay),
+    # y escribe el resultado. Así el karaoke casi no suma tiempo.
+    cola = queue.Queue(maxsize=1)
+    fallas = []
 
+    def etapa_voces():
+        nonlocal energia_cancion
+        while True:
+            tarea = cola.get()
+            if tarea is None or fallas:
+                return
+            inicio, fin, desde, partes = tarea
             try:
-                partes = _separar_demucs(np.ascontiguousarray(original[:, desde:hasta]), muestreo)
                 voz = partes.pop("voz")
                 # Solo se buscan coros donde hay voz: los tramos instrumentales se saltan.
                 if _db(_rms(voz[:, inicio - desde:fin - desde]), rms_cancion) > _NIVEL_MINIMO_DB:
-                    principal = _voz_principal(voz, muestreo)
+                    principal = _sacar_voz(_obtener_karaoke(muestreo), voz, muestreo)
                     partes["voz_principal"], partes["coros"] = principal, voz - principal
                 else:
                     partes["voz_principal"], partes["coros"] = voz, np.zeros_like(voz)
-            except ErrorSeparacion:
-                raise
+
+                # Se escribe el trozo más un poco de su cola, que el siguiente trozo funde con su inicio.
+                hasta_escrito = min(n, fin + fundido)
+                fundir = fundido if inicio > 0 else 0
+                for id_p, datos in partes.items():
+                    nuevo = datos[:, inicio - desde:hasta_escrito - desde]
+                    _escribir(salida[id_p], nuevo, inicio, fundir)
+                    energia[id_p] += float(np.sum(np.square(nuevo[:, :fin - inicio], dtype=np.float64)))
+                energia_cancion += float(np.sum(np.square(original[:, inicio:fin], dtype=np.float64)))
+                if al_avanzar and not (cancelado and cancelado()):
+                    al_avanzar(_audibles(pistas, energia, energia_cancion), fin, n)
             except Exception as error:
-                raise ErrorSeparacion(f"La separación con IA falló:\n{error}")
+                fallas.append(error)
+                return
 
-            # Se escribe el trozo más un poco de su cola, que el siguiente trozo funde con su inicio.
-            hasta_escrito = min(n, fin + fundido)
-            fundir = fundido if inicio > 0 else 0
-            for id_p, datos in partes.items():
-                nuevo = datos[:, inicio - desde:hasta_escrito - desde]
-                _escribir(salida[id_p], nuevo, inicio, fundir)
-                energia[id_p] += float(np.sum(np.square(nuevo[:, :fin - inicio], dtype=np.float64)))
-            energia_cancion += float(np.sum(np.square(original[:, inicio:fin], dtype=np.float64)))
+    def entregar(tarea):
+        """Pasa una tarea a la etapa de voces sin quedarse colgado si esa etapa falló."""
+        while not fallas:
+            try:
+                cola.put(tarea, timeout=0.2)
+                return
+            except queue.Full:
+                pass
 
-            if al_avanzar:
-                al_avanzar(_audibles(pistas, energia, energia_cancion), fin, n)
+    with _candado_modelos:
+        hilo_voces = threading.Thread(target=etapa_voces, daemon=True)
+        hilo_voces.start()
+        try:
+            for k, inicio in enumerate(inicios):
+                if fallas or (cancelado and cancelado()):
+                    break
+                fin = inicios[k + 1] if k + 1 < len(inicios) else n
+                desde, hasta = max(0, inicio - contexto), min(n, fin + contexto)
+                try:
+                    partes = _separar_trozo(np.ascontiguousarray(original[:, desde:hasta]), muestreo, calidad)
+                except Exception as error:
+                    fallas.append(error)
+                    break
+                entregar((inicio, fin, desde, partes))
+        finally:
+            entregar(None)
+            hilo_voces.join()
 
+    if fallas:
+        error = fallas[0]
+        if isinstance(error, ErrorSeparacion):
+            raise error
+        raise ErrorSeparacion(f"La separación con IA falló:\n{error}")
+    if cancelado and cancelado():
+        return None
     return _audibles(pistas, energia, energia_cancion)
 
 
@@ -296,9 +398,10 @@ def _audibles(pistas, energia, energia_cancion):
 
 # ---------- caché: una canción ya separada no se vuelve a procesar ----------
 
-def clave_audio(izquierdo, derecho, muestreo):
+def clave_audio(izquierdo, derecho, muestreo, calidad="rapida"):
     h = hashlib.sha1()
-    h.update(f"{_MODELO_DEMUCS}|{_MODELO_KARAOKE}|{muestreo}|{len(izquierdo)}".encode())
+    modelos = f"{_MODELO_DEMUCS}|{_MODELO_KARAOKE}" + (f"|{_MODELO_VOZ_ALTA}" if calidad == "alta" else "")
+    h.update(f"{modelos}|{muestreo}|{len(izquierdo)}".encode())
     h.update(np.ascontiguousarray(izquierdo).tobytes())
     if derecho is not None:
         h.update(np.ascontiguousarray(derecho).tobytes())
