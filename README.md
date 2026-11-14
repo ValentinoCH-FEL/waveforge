@@ -57,7 +57,21 @@ separa:
 - A/B: escuchar la canción original en el mismo segundo, para comparar.
 - Exporta la mezcla o cada pista (con sus ediciones) como WAV.
 
-**3. DJ** — por ahora solo la pestaña: aquí irá el modo DJ privado.
+**3. DJ** — mezcla sola las canciones de una carpeta o un USB:
+- Analiza cada canción una vez (BPM, compases y tonalidad en la rueda
+  Camelot) y lo guarda en `~/.waveforge/`.
+- Mientras suena una canción, elige la siguiente (tempo parecido,
+  tonalidad compatible y algo de azar) y arma la mezcla en segundo plano.
+- La transición intercambia pistas en 8 compases: cambio de bajo, quitar
+  la batería, voz de una sobre el ritmo de la otra, o corte con eco. La
+  canción que entra se alinea beat por beat y después vuelve a su tempo.
+- Para gastar poco, la IA separa solo los segundos de la mezcla, y cada
+  canción se descarta de la memoria cuando termina.
+- 👍 / 👎 en cada mezcla: las recetas con más votos buenos se eligen más
+  seguido, y el registro (`dj_transiciones.jsonl`) queda como datos para
+  entrenar después un modelo con tu gusto.
+- Pendiente: leer los datos de Rekordbox de un USB, música en línea,
+  elegir canciones parecidas por cómo suenan y el modelo entrenado.
 
 Guarda un registro (`registro.log`) de lo que se hizo y cuándo.
 
@@ -91,6 +105,10 @@ Guarda un registro (`registro.log`) de lo que se hizo y cuándo.
 │   ├── editor.py             # pestaña Moldear: carriles, zoom, tramos, deshacer
 │   ├── ediciones.py          # ediciones por tramo (sin Tk) + resumen de ondas
 │   ├── identificador.py      # huella de voz del cantante (WeSpeaker, ONNX)
+│   ├── dj_ui.py              # pestaña DJ: biblioteca, cabina y votos
+│   ├── dj_sesion.py          # sesión DJ: reproduce, prepara la siguiente mezcla, descarta lo usado
+│   ├── dj_motor.py           # transiciones con stems (recetas, alineación beat a beat)
+│   ├── dj_analisis.py        # BPM, grilla de beats y tonalidad de cada canción
 │   ├── widgets.py            # botones animados, vúmetro, ayudas
 │   ├── separador.py          # separación con IA por trozos + caché
 │   ├── importador.py         # convertir archivos (ffmpeg) y descargar de YouTube (yt-dlp)

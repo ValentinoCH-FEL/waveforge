@@ -4,7 +4,7 @@ main.py — ventana principal (Tkinter), con tres pestañas:
   1. Separación con IA: cargar la canción o el video (archivo o enlace), elegir la
      calidad y ver el avance. Al terminar, se abre sola en Moldear.
   2. Moldear: editor de pistas en línea de tiempo (editor.py).
-  3. DJ: modo DJ privado (por ahora solo la pestaña; viene después).
+  3. DJ: mezcla sola las canciones de una carpeta o USB, con transiciones por pistas (dj_ui.py).
 """
 
 import datetime
@@ -16,6 +16,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import audio_io
+import dj_ui
 import editor
 import importador
 import reproductor
@@ -84,14 +85,13 @@ class AppEstudioAudio:
         self.editor = editor.EditorMoldear(self.pestanas, self.motor, self.mezclador, self._registrar_log,
                                            al_pedir_cancion=lambda: self.pestanas.select(self.tab_ia))
         self.tab_ia = ttk.Frame(self.pestanas)
-        self.tab_dj = ttk.Frame(self.pestanas)
+        self.tab_dj = dj_ui.PestanaDJ(self.pestanas, self._registrar_log, antes_de_sonar=self.mezclador.pausar)
         # Primero se sube y separa la canción; después se moldea.
         self.pestanas.add(self.tab_ia, text="  ✦  1 · Separación con IA  ")
         self.pestanas.add(self.editor, text="  🎚  2 · Moldear  ")
         self.pestanas.add(self.tab_dj, text="  🎧  3 · DJ  ")
 
         self._construir_pestana_ia()
-        self._construir_pestana_dj()
         for secuencia, accion in ATAJOS.items():
             self.root.bind(secuencia, lambda e, a=accion: self._atajo(e, a))
 
@@ -111,6 +111,7 @@ class AppEstudioAudio:
     def _salir(self):
         """Cierra la salida de audio antes de destruir la ventana."""
         self.mezclador.detener()
+        self.tab_dj.detener()
         self.root.destroy()
 
     def _registrar_log(self, mensaje):
@@ -250,18 +251,6 @@ class AppEstudioAudio:
         self._marco_historial = ttk.LabelFrame(cuerpo, text="Canciones de esta sesión")
         self._marco_historial.pack(fill="both", expand=True)
         self._actualizar_historial()
-
-    def _construir_pestana_dj(self):
-        caja = ttk.Frame(self.tab_dj)
-        caja.place(relx=0.5, rely=0.42, anchor="center")
-        ttk.Label(caja, text="🎧", font=("TkDefaultFont", 40)).pack()
-        ttk.Label(caja, text="Modo DJ", style="Titulo.TLabel").pack(pady=(6, 4))
-        ttk.Label(
-            caja,
-            text="Próximamente: mezclar canciones como un DJ, con transiciones automáticas\n"
-                 "según el tempo (BPM) y la tonalidad de cada una.",
-            foreground=COLOR_TEXTO_SUAVE, justify="center",
-        ).pack()
 
     def _actualizar_historial(self):
         for widget in self._marco_historial.winfo_children():
