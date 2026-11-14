@@ -167,6 +167,9 @@ def _crear_separador(modelo, muestreo, prefijo, stem="Vocals", **parametros):
         output_format="WAV",
         output_single_stem=stem,
         normalization_threshold=1.0,  # no cambiar el volumen: la pista se mezcla con las demás
+        # Guardar cada trozo con soundfile y no con pydub: pydub abre ffmpeg en cada llamada, y en
+        # Windows ese arranque a veces falla (0xC0000142) y cortaba la separación a la mitad.
+        use_soundfile=True,
         sample_rate=muestreo,
         **parametros,
     )
