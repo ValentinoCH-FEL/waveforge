@@ -92,7 +92,7 @@ def planear(ana_a, ana_b, rng, pesos=None):
 
     sincronizada = compatibles(ana_a["bpm"], ana_b["bpm"])
     if sincronizada:
-        p = np.array([(pesos or {}).get(r, 1.0) for r in SINCRONIZADAS], dtype=float)
+        p = np.array([(pesos or {}).get(r, 0.5) for r in SINCRONIZADAS], dtype=float)  # 0.5 = sin votos aún
         receta = str(rng.choice(SINCRONIZADAS, p=p / p.sum()))
     else:
         receta = "eco_libre"
