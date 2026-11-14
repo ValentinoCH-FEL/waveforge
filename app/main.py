@@ -1,13 +1,10 @@
 """
-main.py — ventana principal, Tkinter.
+main.py — ventana principal (Tkinter), con tres pestañas:
 
-Paso 1: cargar/convertir/descargar el audio.
-Panel interactivo: todo lo demás en una sola pantalla.
-  - Pistas: separar la canción en voz, batería, bajo... y mezclarlas
-    (volumen, silenciar, solo) mientras suena.
-  - Efecto: a cada pista (o a la mezcla completa) se le puede aplicar un filtro.
-  - Región: elegir qué parte del audio escuchar y previsualizar.
-  - Exportar: la mezcla completa o cada pista por separado.
+  1. Separación con IA: cargar la canción o el video (archivo o enlace), elegir la
+     calidad y ver el avance. Al terminar, se abre sola en Moldear.
+  2. Moldear: editor de pistas en línea de tiempo (editor.py).
+  3. DJ: modo DJ privado (por ahora solo la pestaña; viene después).
 """
 
 import datetime
@@ -18,35 +15,36 @@ import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-import numpy as np
-
 import audio_io
-import filtros_registry
-import graficas
+import editor
 import importador
-import procesamiento
 import reproductor
 import separador
 import tema
 from motor import ErrorMotor, MotorAudio
+from widgets import BotonAnimado
 
 NOMBRE_APP = "Waveforge"
 RAIZ_PROYECTO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ARCHIVO_LOG = os.path.join(RAIZ_PROYECTO, "registro.log")
 
-OPCIONES_DURACION = ["8 s", "15 s", "30 s", "60 s", "Todo el audio"]  # largo de la región a previsualizar
-MILISEGUNDOS_DEBOUNCE = 180     # espera tras mover un control antes de recalcular
-
 COLOR_TEXTO_SUAVE = tema.TEXTO_SUAVE
 COLOR_ERROR = tema.ERROR
+
+# atajo de teclado -> acción del editor (solo con la pestaña Moldear activa)
+ATAJOS = {
+    "<space>": "espacio", "<Delete>": "suprimir", "<Control-z>": "deshacer", "<Control-y>": "rehacer",
+    "<Control-Z>": "rehacer", "<plus>": "acercar", "<KP_Add>": "acercar", "<minus>": "alejar",
+    "<KP_Subtract>": "alejar", "<Home>": "inicio", "<Control-a>": "todo", "<Escape>": "escape",
+}
 
 
 class AppEstudioAudio:
     def __init__(self, root):
         self.root = root
         self.root.title(NOMBRE_APP)
-        self.root.geometry("1100x720")
-        self.root.minsize(980, 620)
+        self.root.geometry("1280x800")
+        self.root.minsize(1100, 660)
         tema.aplicar(self.root)
         self.root.report_callback_exception = self._mostrar_excepcion_tk
 
@@ -59,53 +57,43 @@ class AppEstudioAudio:
                 f"{error}\n\nPodrás explorar la interfaz, pero no procesar audio hasta compilarla.",
             )
 
-        # Estado de la sesión
+        # Canción cargada
         self.info = None
         self.izquierdo = None
         self.derecho = None
         self.historial = []
         self._nombre_base = "audio"
-        self._sesion = 0  # sube con cada archivo nuevo o cambio de pantalla: descarta resultados viejos
+        self._sesion = 0  # sube con cada canción o separación nueva: descarta resultados viejos
 
-        # Pistas (None = audio sin separar, se trata como una sola pista "mezcla")
-        self.pistas = None
-        self._pista_sel = "mezcla"
-        self._filtro_por_pista = {}      # id_pista -> id_filtro
-        self._valores_parametros = {}    # (id_pista, id_filtro) -> valor del control
-        self._volumen = {}               # id_pista -> DoubleVar (0-150 %)
-        self._silencio = {}              # id_pista -> BooleanVar
-        self._solo = {}                  # id_pista -> BooleanVar
-        self._etiquetas_volumen = {}
-        self.var_pista_sel = tk.StringVar(value="mezcla")
-        self._separando = False
-        self._progreso = (0, 1)          # (muestras ya separadas, total)
-        self._estado_separacion = ""     # mensaje al terminar o fallar la separación
+        # Separación con IA
         self.var_calidad = tk.StringVar(value="rapida")  # clave de separador.CALIDADES
+        self.var_publico = tk.BooleanVar(value=False)    # modo concierto: separar al público
+        self._separando = False
+        self._progreso = (0, 1)
+        self._inicio_separacion = 0.0
+        self._estado_separacion = ""
+        self._separadas = False
 
-        # Panel interactivo
-        self.var_parametro = None
-        self._etiqueta_valor = None
-        self._info_parametro = None
-        self._debounce_id = None
-        self._suspender_auto_reproduccion = False
-        self._mezclador = reproductor.Mezclador()
-        self._audio_mezcla = None        # (pistas procesadas, ganancias) de la última vista previa
-        self._ultimo_procesado = None    # (clave, pistas con filtro): evita recalcular si solo cambió el volumen
-        self._reiniciar_audio = False
-
-        # Región del audio que se previsualiza (y que se puede exportar sola)
-        self.var_inicio = tk.DoubleVar(value=0.0)
-        self.var_duracion = tk.StringVar(value=OPCIONES_DURACION[0])
-        self.var_solo_region = tk.BooleanVar(value=False)
+        self.mezclador = reproductor.Mezclador()
 
         self._crear_menu()
         self.root.protocol("WM_DELETE_WINDOW", self._salir)
 
-        self.etiqueta_info = None  # mensaje de estado de la pantalla de carga (solo existe ahí)
-        self.contenedor = ttk.Frame(self.root)
-        self.contenedor.pack(fill="both", expand=True)
+        self.pestanas = ttk.Notebook(self.root)
+        self.pestanas.pack(fill="both", expand=True)
+        self.editor = editor.EditorMoldear(self.pestanas, self.motor, self.mezclador, self._registrar_log,
+                                           al_pedir_cancion=lambda: self.pestanas.select(self.tab_ia))
+        self.tab_ia = ttk.Frame(self.pestanas)
+        self.tab_dj = ttk.Frame(self.pestanas)
+        # Primero se sube y separa la canción; después se moldea.
+        self.pestanas.add(self.tab_ia, text="  ✦  1 · Separación con IA  ")
+        self.pestanas.add(self.editor, text="  🎚  2 · Moldear  ")
+        self.pestanas.add(self.tab_dj, text="  🎧  3 · DJ  ")
 
-        self._mostrar_paso_1()
+        self._construir_pestana_ia()
+        self._construir_pestana_dj()
+        for secuencia, accion in ATAJOS.items():
+            self.root.bind(secuencia, lambda e, a=accion: self._atajo(e, a))
 
         # Mientras el usuario elige o descarga la canción, se cargan los modelos de IA.
         threading.Thread(target=separador.precargar_modelos, daemon=True).start()
@@ -122,19 +110,8 @@ class AppEstudioAudio:
 
     def _salir(self):
         """Cierra la salida de audio antes de destruir la ventana."""
-        self._detener_audio()
+        self.mezclador.detener()
         self.root.destroy()
-
-    def _mostrar_info(self, texto, color=COLOR_TEXTO_SUAVE):
-        """Escribe en la etiqueta de estado de la pantalla de carga, si está visible.
-        "Cargar archivo..." también se puede usar desde el panel, donde esa etiqueta ya no existe."""
-        if self.etiqueta_info is not None and self.etiqueta_info.winfo_exists():
-            self.etiqueta_info.config(text=texto, foreground=color)
-
-    def _limpiar_contenedor(self):
-        self._detener_audio()
-        for widget in self.contenedor.winfo_children():
-            widget.destroy()
 
     def _registrar_log(self, mensaje):
         linea = f"{datetime.datetime.now().isoformat(timespec='seconds')}  {mensaje}\n"
@@ -144,22 +121,31 @@ class AppEstudioAudio:
         except OSError:
             pass  # el log es informativo; un fallo aquí no debe tumbar la app
 
+    def _atajo(self, evento, accion):
+        """Los atajos solo actúan en Moldear, y no mientras se escribe en un campo de texto."""
+        if self.pestanas.select() != str(self.editor):
+            return
+        if isinstance(evento.widget, (tk.Entry, ttk.Entry)) and not isinstance(evento.widget, ttk.Combobox):
+            return
+        self.editor.tecla(accion)
+        return "break"
+
     def _crear_menu(self):
         barra_menu = tk.Menu(self.root)
 
         menu_archivo = tk.Menu(barra_menu, tearoff=0)
         menu_archivo.add_command(label="Cargar archivo...", command=self._elegir_archivo)
+        menu_archivo.add_command(label="Pegar enlace...", command=self._importar_url)
         menu_archivo.add_separator()
         menu_archivo.add_command(label="Salir", command=self._salir)
         barra_menu.add_cascade(label="Archivo", menu=menu_archivo)
 
-        menu_separacion = tk.Menu(barra_menu, tearoff=0)
-        for clave, etiqueta in separador.CALIDADES.items():
-            menu_separacion.add_radiobutton(
-                label=f"Calidad: {etiqueta}", value=clave, variable=self.var_calidad,
-                command=self._cambiar_calidad,
-            )
-        barra_menu.add_cascade(label="Separación", menu=menu_separacion)
+        menu_editar = tk.Menu(barra_menu, tearoff=0)
+        menu_editar.add_command(label="Deshacer", accelerator="Ctrl+Z", command=lambda: self.editor.tecla("deshacer"))
+        menu_editar.add_command(label="Rehacer", accelerator="Ctrl+Y", command=lambda: self.editor.tecla("rehacer"))
+        menu_editar.add_separator()
+        menu_editar.add_command(label="Seleccionar todo", accelerator="Ctrl+A", command=lambda: self.editor.tecla("todo"))
+        barra_menu.add_cascade(label="Editar", menu=menu_editar)
 
         menu_herramientas = tk.Menu(barra_menu, tearoff=0)
         menu_herramientas.add_command(label="Ver registro de la sesión...", command=self._ver_registro)
@@ -188,52 +174,109 @@ class AppEstudioAudio:
     def _acerca_de(self):
         messagebox.showinfo(
             NOMBRE_APP,
-            f"{NOMBRE_APP} — estudio de audio con separación de pistas por IA.\n"
+            f"{NOMBRE_APP} — editor de audio con separación de pistas por IA.\n"
             "Motor de filtros en C++ (ctypes) + Python/Tkinter.",
         )
 
-    # ---------- Paso 1: cargar archivo ----------
+    # ---------- pestaña "Separación con IA" ----------
 
-    def _mostrar_paso_1(self):
-        self._sesion += 1  # si había una separación en curso, su resultado ya no aplica
-        self._separando = False
-        self._limpiar_contenedor()
+    def _construir_pestana_ia(self):
+        cuerpo = ttk.Frame(self.tab_ia)
+        cuerpo.pack(fill="both", expand=True, padx=28, pady=20)
 
-        cuerpo = ttk.Frame(self.contenedor)
-        cuerpo.pack(fill="both", expand=True, padx=28, pady=24)
-
-        ttk.Label(cuerpo, text=NOMBRE_APP, style="Titulo.TLabel").pack(anchor="w")
+        ttk.Label(cuerpo, text="Separación con IA", style="Titulo.TLabel").pack(anchor="w")
         ttk.Label(
             cuerpo,
-            text="Carga un archivo o pega un enlace — en cuanto esté listo entras directo al panel.",
+            text="Carga una canción: la IA la separa en voz, coros e instrumentos y, al terminar, "
+                 "se abre sola en «Moldear» para editarla.",
             foreground=COLOR_TEXTO_SUAVE,
         ).pack(anchor="w", pady=(2, 16))
 
-        marco_drop = ttk.LabelFrame(cuerpo, text="Archivo de audio")
-        marco_drop.pack(fill="x", pady=(0, 14))
+        marco_cancion = ttk.LabelFrame(cuerpo, text="Canción")
+        marco_cancion.pack(fill="x", pady=(0, 12))
         ttk.Label(
-            marco_drop,
-            text="Acepta WAV, MP3, M4A, OGG, FLAC y similares (máximo 10 minutos). "
-                 "Al cargarla, la canción se separa sola en voz, coros e instrumentos.",
-        ).pack(anchor="w", padx=12, pady=(10, 4))
+            marco_cancion,
+            text="Acepta WAV, MP3, M4A, OGG, FLAC, video y similares (máximo 10 minutos), "
+                 "o un enlace de YouTube u otro sitio.",
+        ).pack(anchor="w", padx=12, pady=(10, 6))
+        fila = ttk.Frame(marco_cancion)
+        fila.pack(anchor="w", padx=12, pady=(0, 8))
+        BotonAnimado(fila, "📂  Seleccionar archivo...", self._elegir_archivo, estilo="acento", alto=34).pack(side="left")
+        BotonAnimado(fila, "🔗  Pegar enlace (YouTube u otro)...", self._importar_url, alto=34).pack(
+            side="left", padx=(8, 0))
+        self.etiqueta_info = ttk.Label(marco_cancion, text="Ninguna canción cargada todavía.",
+                                       foreground=COLOR_TEXTO_SUAVE)
+        self.etiqueta_info.pack(anchor="w", padx=12, pady=(0, 10))
 
-        fila_botones_origen = ttk.Frame(marco_drop)
-        fila_botones_origen.pack(anchor="w", padx=12, pady=(0, 12))
-        ttk.Button(fila_botones_origen, text="Seleccionar archivo...", command=self._elegir_archivo).pack(
-            side="left"
-        )
-        ttk.Button(
-            fila_botones_origen, text="Pegar enlace (YouTube u otro)...", command=self._importar_url
-        ).pack(side="left", padx=(8, 0))
+        marco_calidad = ttk.LabelFrame(cuerpo, text="Calidad de la separación")
+        marco_calidad.pack(fill="x", pady=(0, 12))
+        for clave, etiqueta in separador.CALIDADES.items():
+            ttk.Radiobutton(
+                marco_calidad, text=etiqueta, value=clave, variable=self.var_calidad,
+                command=self._cambiar_calidad,
+            ).pack(anchor="w", padx=12, pady=(8, 0))
+        ttk.Label(
+            marco_calidad,
+            text="Rápida: Demucs saca la voz (en una PC de 6 núcleos, menos de lo que dura la canción). "
+                 "Alta: RoFormer saca una voz bastante más limpia, pero sin tarjeta NVIDIA tarda varias veces "
+                 "lo que dura la canción (la primera vez descarga ~900 MB). Cambiarla con una canción cargada "
+                 "la vuelve a separar; cada calidad queda guardada.",
+            foreground=COLOR_TEXTO_SUAVE, wraplength=980, justify="left",
+        ).pack(anchor="w", padx=12, pady=(6, 10))
 
-        self.etiqueta_info = ttk.Label(cuerpo, text="Ningún archivo cargado todavía.", foreground=COLOR_TEXTO_SUAVE)
-        self.etiqueta_info.pack(anchor="w", pady=(0, 14))
+        marco_tipo = ttk.LabelFrame(cuerpo, text="¿Es un concierto o una grabación en vivo?")
+        marco_tipo.pack(fill="x", pady=(0, 12))
+        ttk.Checkbutton(
+            marco_tipo, text="🎤  Modo concierto: separar al público de la voz del cantante",
+            variable=self.var_publico, command=self._cambiar_calidad,
+        ).pack(anchor="w", padx=12, pady=(8, 0))
+        ttk.Label(
+            marco_tipo,
+            text="Para videos de conciertos donde la gente canta, grita o aplaude. La gente queda en su propia "
+                 "pista «Público» y la «Voz principal» queda solo con el cantante. Para dejar solo su voz: "
+                 "en Moldear, botón S (solo) de «Voz principal», y exportar. Funciona mejor cuando el cantante "
+                 "suena por encima del público; si todos cantan igual de fuerte, algo de público se cuela.",
+            foreground=COLOR_TEXTO_SUAVE, wraplength=980, justify="left",
+        ).pack(anchor="w", padx=12, pady=(4, 10))
 
-        if self.historial:
-            marco_hist = ttk.LabelFrame(cuerpo, text="Archivos de esta sesión")
-            marco_hist.pack(fill="both", expand=True)
-            for ruta in self.historial[-8:]:
-                ttk.Label(marco_hist, text=os.path.basename(ruta)).pack(anchor="w", padx=12, pady=2)
+        marco_avance = ttk.LabelFrame(cuerpo, text="Avance")
+        marco_avance.pack(fill="x", pady=(0, 12))
+        self._etiqueta_progreso = ttk.Label(marco_avance, text="Esperando una canción.",
+                                            foreground=COLOR_TEXTO_SUAVE)
+        self._etiqueta_progreso.pack(anchor="w", padx=12, pady=(10, 4))
+        self._barra_progreso = ttk.Progressbar(marco_avance, mode="determinate", maximum=1000)
+        self._barra_progreso.pack(fill="x", padx=12, pady=(0, 12))
+
+        self._marco_historial = ttk.LabelFrame(cuerpo, text="Canciones de esta sesión")
+        self._marco_historial.pack(fill="both", expand=True)
+        self._actualizar_historial()
+
+    def _construir_pestana_dj(self):
+        caja = ttk.Frame(self.tab_dj)
+        caja.place(relx=0.5, rely=0.42, anchor="center")
+        ttk.Label(caja, text="🎧", font=("TkDefaultFont", 40)).pack()
+        ttk.Label(caja, text="Modo DJ", style="Titulo.TLabel").pack(pady=(6, 4))
+        ttk.Label(
+            caja,
+            text="Próximamente: mezclar canciones como un DJ, con transiciones automáticas\n"
+                 "según el tempo (BPM) y la tonalidad de cada una.",
+            foreground=COLOR_TEXTO_SUAVE, justify="center",
+        ).pack()
+
+    def _actualizar_historial(self):
+        for widget in self._marco_historial.winfo_children():
+            widget.destroy()
+        if not self.historial:
+            ttk.Label(self._marco_historial, text="Todavía ninguna.", foreground=COLOR_TEXTO_SUAVE).pack(
+                anchor="w", padx=12, pady=8
+            )
+        for ruta in self.historial[-8:]:
+            ttk.Label(self._marco_historial, text=os.path.basename(ruta)).pack(anchor="w", padx=12, pady=2)
+
+    def _mostrar_info(self, texto, color=COLOR_TEXTO_SUAVE):
+        self.etiqueta_info.config(text=texto, foreground=color)
+
+    # ---------- cargar la canción ----------
 
     def _elegir_archivo(self):
         ruta = filedialog.askopenfilename(
@@ -244,6 +287,7 @@ class AppEstudioAudio:
         )
         if not ruta:
             return
+        self.pestanas.select(self.tab_ia)
 
         if audio_io.es_wav_nativo(ruta):
             self._cargar_ruta_wav(ruta, ruta_original=ruta)
@@ -263,7 +307,7 @@ class AppEstudioAudio:
         self.root.after(0, lambda: self._cargar_ruta_wav(ruta_wav, ruta_original=ruta_origen))
 
     def _error_importacion(self, error):
-        self._mostrar_info("No se pudo importar el archivo.", COLOR_ERROR)
+        self._mostrar_info("No se pudo importar la canción.", COLOR_ERROR)
         messagebox.showerror("Error al importar", str(error))
 
     def _importar_url(self):
@@ -274,7 +318,7 @@ class AppEstudioAudio:
         )
         if not url:
             return
-
+        self.pestanas.select(self.tab_ia)
         self._mostrar_info("Descargando audio...")
         self.root.update_idletasks()
         threading.Thread(target=self._descargar_en_hilo, args=(url,), daemon=True).start()
@@ -298,381 +342,75 @@ class AppEstudioAudio:
             info, izquierdo, derecho = audio_io.cargar_wav(ruta_wav)
             if info.duracion_segundos > separador.DURACION_MAXIMA_S:
                 raise audio_io.ErrorFormatoAudio(
-                    f"El audio dura {self._formato_tiempo(info.duracion_segundos)}; "
+                    f"El audio dura {editor.formato_tiempo(info.duracion_segundos)}; "
                     f"el máximo permitido es {separador.DURACION_MAXIMA_S // 60} minutos."
                 )
         except audio_io.ErrorFormatoAudio as error:
             messagebox.showerror("Archivo no válido", str(error))
-            self._mostrar_info("Ningún archivo cargado todavía.")
+            self._mostrar_info("Ninguna canción cargada todavía.")
             return
         self.info, self.izquierdo, self.derecho = info, izquierdo, derecho
 
         if ruta_original not in self.historial:
             self.historial.append(ruta_original)
+        self._actualizar_historial()
         self._registrar_log(f"Archivo cargado: {ruta_original}")
         self._nombre_base = (
             os.path.splitext(os.path.basename(ruta_original))[0] if os.path.exists(ruta_original) else "audio"
         )
-
-        # Archivo nuevo: se empieza de cero (sin pistas, sin efectos, región al inicio).
-        self._detener_audio()
-        self._sesion += 1
-        self._separando = False
-        self.pistas = None
-        self._pista_sel = "mezcla"
-        self.var_pista_sel.set("mezcla")
-        self._filtro_por_pista = {}
-        self._valores_parametros = {}
-        self._volumen, self._silencio, self._solo = {}, {}, {}
-        self._asegurar_controles("mezcla")
-        self.var_inicio.set(0.0)
-        self._audio_mezcla = None
-        self._estado_separacion = ""
-
-        # Audio listo -> directo al panel interactivo; la separación arranca sola.
-        self._mostrar_panel()
+        self._mostrar_info(f"{self._nombre_base}  ·  {info.resumen()}")
         self._iniciar_separacion()
 
-    # ---------- pistas: datos ----------
+    # ---------- separación (arranca sola al cargar la canción) ----------
 
-    def _asegurar_controles(self, id_pista):
-        if id_pista not in self._volumen:
-            self._volumen[id_pista] = tk.DoubleVar(value=100.0)
-            self._silencio[id_pista] = tk.BooleanVar(value=False)
-            self._solo[id_pista] = tk.BooleanVar(value=False)
-
-    def _lista_pistas(self):
-        """Las pistas separadas, o una sola pista "mezcla" con el audio original."""
-        if self.pistas:
-            return self.pistas
-        return [{"id": "mezcla", "etiqueta": "Audio", "color": tema.ROJO, "izq": self.izquierdo, "der": self.derecho}]
-
-    def _pista_actual(self):
-        for pista in self._lista_pistas():
-            if pista["id"] == self._pista_sel:
-                return pista
-        return self._lista_pistas()[0]
-
-    def _valor_parametro(self, id_pista, id_filtro):
-        info = filtros_registry.obtener(id_filtro)
-        if info["parametro"] is None:
-            return 0.0
-        return self._valores_parametros.get((id_pista, id_filtro), info["parametro"]["default"])
-
-    def _snapshot(self):
-        """Foto de todo lo que decide el resultado (pista, filtro, valor, volumen, silencio/solo).
-        Se toma en el hilo de la interfaz para poder usarla después en otro hilo sin tocar Tk."""
-        pistas = self._lista_pistas()
-        hay_solo = any(self._solo[p["id"]].get() for p in pistas)
-        elementos = []
-        for pista in pistas:
-            id_p = pista["id"]
-            id_f = self._filtro_por_pista.get(id_p, "ninguno")
-            volumen = self._volumen[id_p].get() / 100.0
-            activa = (not hay_solo or self._solo[id_p].get()) and not self._silencio[id_p].get()
-            elementos.append({
-                "pista": pista,
-                "info": filtros_registry.obtener(id_f),
-                "valor": self._valor_parametro(id_p, id_f),
-                "vol": volumen,
-                "ganancia": volumen if activa else 0.0,
-            })
-        return elementos
-
-    def _procesar_snapshot(self, elementos, i0, i1):
-        """Aplica el filtro de cada pista a [i0:i1]. Devuelve [(izq, der), ...] (der nunca es None)."""
-        salida = []
-        for e in elementos:
-            pista = e["pista"]
-            izq = pista["izq"][i0:i1]
-            der = pista["der"][i0:i1] if pista["der"] is not None else None
-            res_izq, res_der = procesamiento.aplicar_filtro(self.motor, e["info"], e["valor"], izq, der)
-            salida.append((res_izq, res_izq if res_der is None else res_der))
-        return salida
-
-    # ---------- región del audio ----------
-
-    @staticmethod
-    def _formato_tiempo(segundos):
-        segundos = int(round(segundos))
-        return f"{segundos // 60}:{segundos % 60:02d}"
-
-    def _duracion_total(self):
-        return len(self.izquierdo) / float(self.info.muestreo)
-
-    def _segundos_region(self):
-        """Largo elegido en segundos, o None si es 'Todo el audio'."""
-        texto = self.var_duracion.get()
-        if texto == "Todo el audio":
-            return None
-        return float(texto.split()[0])
-
-    def _limites_region(self):
-        """Devuelve (i0, i1): muestras donde empieza y termina la región elegida."""
-        n = len(self.izquierdo)
-        dur = self._segundos_region()
-        if dur is None:
-            return 0, n
-        sr = self.info.muestreo
-        max_inicio = max(0.0, self._duracion_total() - dur)
-        inicio = min(max(self.var_inicio.get(), 0.0), max_inicio)
-        i0 = int(inicio * sr)
-        return i0, min(n, i0 + int(dur * sr))
-
-    def _configurar_escala_inicio(self):
-        dur = self._segundos_region()
-        if dur is None:
-            self.var_inicio.set(0.0)
-            self._escala_inicio.config(to=1.0)
-            self._escala_inicio.state(["disabled"])
-        else:
-            max_inicio = max(0.0, self._duracion_total() - dur)
-            self._escala_inicio.config(to=max(max_inicio, 0.01))
-            if self.var_inicio.get() > max_inicio:
-                self.var_inicio.set(max_inicio)
-            self._escala_inicio.state(["!disabled"] if max_inicio > 0 else ["disabled"])
-        self._actualizar_etiqueta_region()
-
-    def _actualizar_etiqueta_region(self):
-        i0, i1 = self._limites_region()
-        sr = self.info.muestreo
-        self.etiqueta_region.config(
-            text=f"{self._formato_tiempo(i0 / sr)} – {self._formato_tiempo(i1 / sr)}  "
-                 f"(de {self._formato_tiempo(self._duracion_total())})"
-        )
-
-    def _on_cambio_duracion(self):
-        self._configurar_escala_inicio()
-        self._reiniciar_audio = True
-        self._programar_vista_previa()
-
-    def _on_cambio_inicio(self):
-        self._actualizar_etiqueta_region()
-        self._reiniciar_audio = True
-        self._programar_vista_previa()
-
-    # ---------- panel interactivo ----------
-
-    def _mostrar_panel(self):
-        self._limpiar_contenedor()
-
-        barra = ttk.Frame(self.contenedor)
-        barra.pack(fill="x", padx=18, pady=(14, 6))
-        ttk.Label(barra, text=NOMBRE_APP, style="Titulo.TLabel").pack(side="left")
-        ttk.Label(barra, text=f"  ·  {self.info.resumen()}", foreground=COLOR_TEXTO_SUAVE).pack(side="left")
-        ttk.Button(barra, text="Cargar otro archivo", command=self._mostrar_paso_1).pack(side="right")
-        ttk.Separator(self.contenedor).pack(fill="x")
-
-        pie = ttk.Frame(self.contenedor)
-        pie.pack(fill="x", padx=18, pady=14, side="bottom")
-        self.boton_exportar = ttk.Button(
-            pie, text="Exportar mezcla como WAV...", style="Acento.TButton", command=self._exportar_mezcla
-        )
-        self.boton_exportar.pack(side="right")
-        self.boton_exportar_pistas = ttk.Button(
-            pie, text="Exportar cada pista por separado...", command=self._exportar_pistas
-        )
-        self.boton_exportar_pistas.pack(side="right", padx=(0, 10))
-        self._actualizar_botones_exportar()
-
-        cuerpo = ttk.Frame(self.contenedor)
-        cuerpo.pack(fill="both", expand=True, padx=18, pady=12)
-
-        # ----- columna izquierda: pistas (arriba) y efecto de la pista elegida (abajo) -----
-        columna_izq = ttk.Frame(cuerpo)
-        columna_izq.pack(side="left", fill="y", padx=(0, 14))
-        self._marco_pistas = ttk.LabelFrame(columna_izq, text="Pistas")
-        self._marco_pistas.pack(side="top", fill="x")
-        self._marco_filtros = ttk.LabelFrame(columna_izq, text="Efecto")
-        self._marco_filtros.pack(side="top", fill="both", expand=True, pady=(10, 0))
-        lista = tema.PanelDesplazable(self._marco_filtros, ancho=250)
-        lista.pack(fill="both", expand=True, padx=4, pady=6)
-        self._contenedor_filtros = lista.interior
-
-        # ----- columna derecha -----
-        columna_der = ttk.Frame(cuerpo)
-        columna_der.pack(side="left", fill="both", expand=True)
-
-        # Lo de tamaño fijo se empaqueta primero y de abajo hacia arriba; la gráfica
-        # va al final y es la que se encoge si la ventana es chica (así nada se corta).
-        if not reproductor.disponible():
-            ttk.Label(
-                columna_der,
-                text="(Falta el paquete sounddevice para escuchar en vivo: pip install sounddevice)",
-                foreground=COLOR_TEXTO_SUAVE,
-            ).pack(side="bottom", anchor="w")
-
-        self.etiqueta_estado_previa = ttk.Label(columna_der, text="", foreground=COLOR_TEXTO_SUAVE)
-        self.etiqueta_estado_previa.pack(side="bottom", anchor="w", pady=(4, 0))
-
-        fila_reproduccion = ttk.Frame(columna_der)
-        fila_reproduccion.pack(side="bottom", fill="x", pady=(8, 0))
-        ttk.Button(fila_reproduccion, text="▶ Escuchar mezcla", command=self._escuchar_mezcla).pack(side="left")
-        ttk.Button(fila_reproduccion, text="▶ Original", command=self._escuchar_original).pack(
-            side="left", padx=(8, 0)
-        )
-        ttk.Button(fila_reproduccion, text="■ Detener", command=self._detener_audio).pack(side="left", padx=(8, 0))
-
-        self.var_autoreproducir = tk.BooleanVar(value=reproductor.disponible())
-        check_auto = ttk.Checkbutton(
-            fila_reproduccion, text="Escuchar al mover un control", variable=self.var_autoreproducir
-        )
-        check_auto.pack(side="left", padx=(16, 0))
-        if not reproductor.disponible():
-            check_auto.config(state="disabled")
-            self.var_autoreproducir.set(False)
-
-        marco_region = ttk.LabelFrame(columna_der, text="Región del audio a escuchar y previsualizar")
-        marco_region.pack(side="bottom", fill="x", pady=(8, 0))
-        fila_region = ttk.Frame(marco_region)
-        fila_region.pack(fill="x", padx=10, pady=(6, 2))
-        ttk.Label(fila_region, text="Duración:").pack(side="left")
-        combo_duracion = ttk.Combobox(
-            fila_region, textvariable=self.var_duracion, values=OPCIONES_DURACION, state="readonly", width=13
-        )
-        combo_duracion.pack(side="left", padx=(6, 16))
-        combo_duracion.bind("<<ComboboxSelected>>", lambda evento: self._on_cambio_duracion())
-        ttk.Label(fila_region, text="Inicio:").pack(side="left")
-        self._escala_inicio = ttk.Scale(
-            fila_region, from_=0.0, to=1.0, variable=self.var_inicio, orient="horizontal",
-            command=lambda valor: self._on_cambio_inicio(),
-        )
-        self._escala_inicio.pack(side="left", fill="x", expand=True, padx=(6, 10))
-        self.etiqueta_region = ttk.Label(fila_region, text="", width=22, foreground=COLOR_TEXTO_SUAVE)
-        self.etiqueta_region.pack(side="left")
-        ttk.Checkbutton(
-            marco_region,
-            text="Al exportar la mezcla, aplicar los cambios solo a esta región (el resto queda igual)",
-            variable=self.var_solo_region,
-        ).pack(anchor="w", padx=10, pady=(0, 6))
-
-        marco_grafica = ttk.Frame(columna_der)
-        marco_grafica.pack(side="top", fill="both", expand=True)
-        self._grafica = graficas.GraficaPistas(marco_grafica)
-        self._grafica.widget.pack(fill="both", expand=True)
-        self._ultimo_procesado = None
-
-        self._configurar_escala_inicio()
-        self._construir_panel_pistas()
-        self._construir_lista_filtros()
-        self._refrescar_vista_sin_sonar()  # no sonar nada al entrar al panel
-
-    # ---------- panel de pistas (separar y mezclar) ----------
-
-    def _construir_panel_pistas(self):
-        for widget in self._marco_pistas.winfo_children():
-            widget.destroy()
-        self._etiquetas_volumen = {}
-
-        self._barra_progreso = None
-        self._etiqueta_progreso = None
-        if self._separando:
-            self._etiqueta_progreso = ttk.Label(
-                self._marco_pistas, text="", wraplength=250, justify="left", foreground=COLOR_TEXTO_SUAVE
-            )
-            self._etiqueta_progreso.pack(anchor="w", padx=10, pady=(8, 2))
-            self._barra_progreso = ttk.Progressbar(self._marco_pistas, mode="determinate", maximum=1000)
-            self._barra_progreso.pack(fill="x", padx=10, pady=(0, 4))
-            self._actualizar_progreso()
-        elif self._estado_separacion:
-            ttk.Label(
-                self._marco_pistas, text=self._estado_separacion, wraplength=250, justify="left",
-                foreground=COLOR_TEXTO_SUAVE,
-            ).pack(anchor="w", padx=10, pady=(8, 2))
-
-        for pista in self.pistas or []:
-            self._fila_pista(pista)
-        ttk.Frame(self._marco_pistas, height=8).pack()
-
-    def _fila_pista(self, pista):
-        id_p = pista["id"]
-        fila = ttk.Frame(self._marco_pistas)
-        fila.pack(fill="x", padx=10, pady=(6, 0))
-
-        arriba = ttk.Frame(fila)
-        arriba.pack(fill="x")
-        tk.Frame(arriba, width=10, height=10, bg=pista["color"]).pack(side="left", padx=(0, 6))
-        ttk.Radiobutton(
-            arriba, text=pista["etiqueta"], value=id_p, variable=self.var_pista_sel,
-            command=lambda i=id_p: self._seleccionar_pista(i),
-        ).pack(side="left")
-        ttk.Checkbutton(
-            arriba, text="S", width=2, style="Solo.Toolbutton", variable=self._solo[id_p],
-            command=self._on_mezcla_cambio,
-        ).pack(side="right", padx=(3, 0))
-        ttk.Checkbutton(
-            arriba, text="M", width=2, style="Mute.Toolbutton", variable=self._silencio[id_p],
-            command=self._on_mezcla_cambio,
-        ).pack(side="right")
-
-        abajo = ttk.Frame(fila)
-        abajo.pack(fill="x")
-        ttk.Scale(
-            abajo, from_=0, to=150, variable=self._volumen[id_p], orient="horizontal",
-            command=lambda valor: self._on_mezcla_cambio(),
-        ).pack(side="left", fill="x", expand=True)
-        etiqueta = ttk.Label(abajo, text="100%", width=5, anchor="e", foreground=COLOR_TEXTO_SUAVE)
-        etiqueta.pack(side="left", padx=(6, 0))
-        self._etiquetas_volumen[id_p] = etiqueta
-
-    def _seleccionar_pista(self, id_pista):
-        self._pista_sel = id_pista
-        self._construir_lista_filtros()
-
-    def _on_mezcla_cambio(self):
-        """Cambió un volumen, un M o un S: el sonido cambia al instante; la gráfica se redibuja
-        al soltar el control (redibujar en cada movimiento del mouse trababa la interfaz)."""
-        elementos = self._snapshot()
-        for e in elementos:
-            etiqueta = self._etiquetas_volumen.get(e["pista"]["id"])
-            if etiqueta is not None:
-                etiqueta.config(text=f"{round(e['vol'] * 100)}%")
-        if self._mezclador.cantidad_pistas == len(elementos):
-            self._mezclador.cambiar_ganancias([e["ganancia"] for e in elementos])
-        self._programar_vista_previa(espera_ms=400)
-
-    # ---------- separación automática (arranca sola al cargar el audio) ----------
+    def _cambiar_calidad(self):
+        """Otra calidad o modo concierto: si hay una canción cargada, se vuelve a separar."""
+        if self.info is not None:
+            self._iniciar_separacion()
 
     def _iniciar_separacion(self):
+        self._sesion += 1  # cancela la separación anterior, si seguía corriendo
+        self._estado_separacion = ""
+        self._separadas = False
+
         instrucciones = separador.falta_instalar()
         if instrucciones:
-            self._estado_separacion = "La separación con IA no está instalada."
-            self._construir_panel_pistas()
+            self._separando = False
+            self._estado_separacion = "La separación con IA no está instalada: se edita la canción entera."
+            self._actualizar_progreso()
+            self._abrir_en_moldear(None)
             messagebox.showinfo("Separación con IA", instrucciones)
             return
 
+        calidad = self.var_calidad.get()
         self._separando = True
-        self._espera_primer_trozo = (
-            "unos minutos (la primera vez descarga el modelo, ~900 MB)" if self.var_calidad.get() == "alta"
-            else "unos segundos"
-        )
         self._progreso = (0, len(self.izquierdo))
         self._inicio_separacion = time.perf_counter()
-        self._actualizar_botones_exportar()
-        self._construir_panel_pistas()
+        self.editor.mostrar_vacio("Separando con IA...\nLa canción se abre aquí sola cuando termine.\n"
+                                  "El avance está en la pestaña «Separación con IA».")
         self._tick_progreso()
 
         threading.Thread(
             target=self._separar_en_hilo,
-            args=(self._sesion, self.izquierdo, self.derecho, self.info.muestreo, self.var_calidad.get()),
+            args=(self._sesion, self.izquierdo, self.derecho, self.info.muestreo, calidad, self.var_publico.get()),
             daemon=True,
         ).start()
 
-    def _separar_en_hilo(self, sesion, izquierdo, derecho, muestreo, calidad):
-        def avance(pistas, hecho, total):
-            self.root.after(0, lambda: self._on_avance_separacion(sesion, pistas, hecho, total))
+    def _separar_en_hilo(self, sesion, izquierdo, derecho, muestreo, calidad, publico):
+        def avance(_pistas, hecho, total):
+            self.root.after(0, lambda: self._on_avance_separacion(sesion, hecho, total))
 
         try:
-            clave = separador.clave_audio(izquierdo, derecho, muestreo, calidad)
+            clave = separador.clave_audio(izquierdo, derecho, muestreo, calidad, publico)
             pistas = separador.cargar_de_cache(clave)
             desde_cache = pistas is not None
             if not desde_cache:
                 pistas = separador.separar_por_partes(
                     izquierdo, derecho, muestreo, al_avanzar=avance,
-                    cancelado=lambda: sesion != self._sesion, calidad=calidad,
+                    cancelado=lambda: sesion != self._sesion, calidad=calidad, publico=publico,
                 )
                 if pistas is None:
-                    return  # cancelada: se cargó otro archivo
+                    return  # cancelada: otra canción u otra calidad
                 separador.guardar_en_cache(clave, pistas)
         except Exception as error:  # cualquier fallo del modelo: avisar, no cerrar la app
             mensaje = str(error) if isinstance(error, separador.ErrorSeparacion) else f"Error inesperado:\n{error}"
@@ -680,396 +418,68 @@ class AppEstudioAudio:
             return
         self.root.after(0, lambda: self._separacion_lista(sesion, pistas, desde_cache))
 
-    def _cambiar_calidad(self):
-        """Otra calidad elegida en el menú: si hay una canción cargada, se vuelve a separar."""
-        if self.info is None or not hasattr(self, "_marco_pistas") or not self._marco_pistas.winfo_exists():
-            return  # se aplicará a la próxima canción
-        self._detener_audio()
-        self._sesion += 1  # cancela la separación en curso, si la hay
-        self.pistas = None
-        self._pista_sel = "mezcla"
-        self.var_pista_sel.set("mezcla")
-        self._estado_separacion = ""
-        self._construir_lista_filtros()
-        self._iniciar_separacion()
-        self._refrescar_vista_sin_sonar()
+    def _on_avance_separacion(self, sesion, hecho, total):
+        if sesion == self._sesion and self._separando:
+            self._progreso = (hecho, total)
+            self._actualizar_progreso()
 
     def _tick_progreso(self):
-        """Actualiza el reloj de la separación cada medio segundo."""
         if not self._separando:
             return
         self._actualizar_progreso()
         self.root.after(500, self._tick_progreso)
 
     def _actualizar_progreso(self):
-        if self._etiqueta_progreso is None:
-            return
-        hecho, total = self._progreso
-        sr = self.info.muestreo
-        transcurrido = time.perf_counter() - self._inicio_separacion
-        texto = (
-            f"Separando con IA... {self._formato_tiempo(hecho / sr)} de {self._formato_tiempo(total / sr)} "
-            f"listo ({self._formato_tiempo(transcurrido)}). Ya puedes escuchar y editar lo separado."
-            if hecho else
-            f"Separando con IA... la primera parte estará lista en {self._espera_primer_trozo} "
-            f"({self._formato_tiempo(transcurrido)})."
-        )
-        try:
-            self._etiqueta_progreso.config(text=texto)
-            self._barra_progreso.config(value=1000 * hecho / max(total, 1))
-        except tk.TclError:
-            pass  # el panel se está reconstruyendo
-
-    def _on_avance_separacion(self, sesion, pistas, hecho, total):
-        """Llegó un trozo nuevo: actualiza progreso, pistas visibles y (si hace falta) la vista previa."""
-        if sesion != self._sesion or not self._separando:
-            return
-        anterior = self._progreso[0]
-        self._progreso = (hecho, total)
-        if self._aplicar_pistas(pistas):
-            self._refrescar_vista_sin_sonar()
-            return
-        self._actualizar_progreso()
-        i0, i1 = self._limites_region()
-        if i0 < hecho and i1 > anterior:  # el trozo nuevo cae dentro de la región que se está viendo
-            self._refrescar_vista_sin_sonar()
-
-    def _aplicar_pistas(self, pistas):
-        """Muestra estas pistas si cambió cuáles son. Devuelve True si reconstruyó el panel."""
-        ids = [p["id"] for p in pistas]
-        if ids == [p["id"] for p in self.pistas or []]:
-            self.pistas = pistas
-            return False
-        self.pistas = pistas or None
-        for id_p in ids:
-            self._asegurar_controles(id_p)
-        if self._pista_sel not in ids:
-            self._pista_sel = ids[0] if ids else "mezcla"
-            self.var_pista_sel.set(self._pista_sel)
-        self._construir_panel_pistas()
-        self._construir_lista_filtros()
-        return True
+        if self._separando:
+            hecho, total = self._progreso
+            sr = self.info.muestreo
+            transcurrido = editor.formato_tiempo(time.perf_counter() - self._inicio_separacion)
+            if hecho:
+                texto = (f"Separando con IA ({separador.CALIDADES[self.var_calidad.get()]})... "
+                         f"{editor.formato_tiempo(hecho / sr)} de {editor.formato_tiempo(total / sr)} listo · "
+                         f"{transcurrido}")
+            else:
+                espera = ("unos minutos (la primera vez descarga el modelo, ~900 MB)"
+                          if self.var_calidad.get() == "alta" else "unos segundos")
+                texto = f"Separando con IA... la primera parte estará lista en {espera} · {transcurrido}"
+            valor = 1000 * hecho / max(total, 1)
+        else:
+            texto = self._estado_separacion or "Esperando una canción."
+            valor = 1000 if self._separadas else 0
+        self._etiqueta_progreso.config(text=texto)
+        self._barra_progreso.config(value=valor)
 
     def _separacion_fallida(self, sesion, mensaje):
         if sesion != self._sesion:
             return
         self._separando = False
-        self._estado_separacion = "No se pudo separar la canción."
-        self._actualizar_botones_exportar()
-        self._construir_panel_pistas()
+        self._estado_separacion = "No se pudo separar la canción: se edita entera, como una sola pista."
+        self._actualizar_progreso()
+        self._abrir_en_moldear(None)
         messagebox.showerror("No se pudo separar", mensaje)
 
     def _separacion_lista(self, sesion, pistas, desde_cache):
         if sesion != self._sesion:
-            return  # mientras tanto se cargó otro archivo o se cambió de pantalla
+            return  # mientras tanto se cargó otra canción o se cambió la calidad
         self._separando = False
+        self._separadas = True
         segundos = time.perf_counter() - self._inicio_separacion
-        nombres = ", ".join(p["etiqueta"] for p in pistas)
         if desde_cache:
             self._estado_separacion = "Pistas recuperadas de una separación anterior."
         else:
-            self._estado_separacion = f"Separada en {self._formato_tiempo(segundos)}."
-            self._registrar_log(f"Pistas separadas en {segundos:.1f}s: {nombres}")
-        self._aplicar_pistas(pistas)
-        self._construir_panel_pistas()
-        self._actualizar_botones_exportar()
-        self._refrescar_vista_sin_sonar()
+            self._estado_separacion = f"Separada en {editor.formato_tiempo(segundos)}."
+            self._registrar_log(f"Pistas separadas en {segundos:.1f}s: " + ", ".join(p["etiqueta"] for p in pistas))
+        self._actualizar_progreso()
+        self._abrir_en_moldear(pistas)
 
-    def _actualizar_botones_exportar(self):
-        """Exportar espera a que termine la separación (si no, faltaría parte de las pistas)."""
-        if self._separando:
-            self.boton_exportar.config(state="disabled", text="Exportar (esperando separación)")
-            self.boton_exportar_pistas.config(state="disabled")
-            return
-        self.boton_exportar.config(
-            state="normal" if self.motor is not None else "disabled", text="Exportar mezcla como WAV..."
-        )
-        self.boton_exportar_pistas.config(state="normal" if self.pistas else "disabled")
-
-    def _refrescar_vista_sin_sonar(self):
-        """Recalcula y redibuja la vista previa sin arrancar la reproducción por su cuenta."""
-        self._suspender_auto_reproduccion = True
-        self._generar_vista_previa(forzar=True)
-        self._suspender_auto_reproduccion = False
-
-    # ---------- efecto de la pista elegida ----------
-
-    def _construir_lista_filtros(self):
-        for widget in self._contenedor_filtros.winfo_children():
-            widget.destroy()
-
-        pista = self._pista_actual()
-        self._marco_filtros.config(text=f"Efecto para: {pista['etiqueta']}" if self.pistas else "Efecto")
-        actual = self._filtro_por_pista.get(self._pista_sel, "ninguno")
-        self.var_filtro = tk.StringVar(value=actual)
-        self._marcos_parametro = {}
-
-        for id_filtro, etiqueta in filtros_registry.listar():
-            info_filtro = filtros_registry.obtener(id_filtro)
-
-            marco_item = ttk.Frame(self._contenedor_filtros)
-            marco_item.pack(fill="x", pady=(0, 10))
-
-            ttk.Radiobutton(
-                marco_item, text=etiqueta, value=id_filtro, variable=self.var_filtro,
-                command=lambda: self._seleccionar_filtro(self.var_filtro.get()),
-            ).pack(anchor="w")
-            ttk.Label(
-                marco_item, text=info_filtro["descripcion"], foreground=COLOR_TEXTO_SUAVE,
-                wraplength=230, justify="left",
-            ).pack(anchor="w", padx=(20, 0))
-
-            marco_parametro = ttk.Frame(marco_item)
-            marco_parametro.pack(fill="x", padx=(20, 0), pady=(4, 0))
-            self._marcos_parametro[id_filtro] = marco_parametro
-
-        if not self._marcos_parametro:
-            ttk.Label(
-                self._contenedor_filtros,
-                text="No hay filtros disponibles.\nRevisa app/filtros_registry.py",
-                foreground=COLOR_ERROR, justify="left",
-            ).pack(anchor="w")
-
-        if actual in self._marcos_parametro:
-            self._construir_control_parametro(actual)
-
-    def _seleccionar_filtro(self, id_filtro):
-        self._filtro_por_pista[self._pista_sel] = id_filtro
-        self._construir_control_parametro(id_filtro)
-        self._generar_vista_previa()
-
-    @staticmethod
-    def _texto_parametro(p, valor):
-        return f"{p['nombre']}: {valor:.{p.get('decimales', 2)}f}{p.get('unidad', '')}"
-
-    def _construir_control_parametro(self, id_filtro):
-        # Limpia el slot de parámetro de todos los filtros (solo el elegido muestra el suyo).
-        for marco in self._marcos_parametro.values():
-            for widget in marco.winfo_children():
-                widget.destroy()
-
-        info_filtro = filtros_registry.obtener(id_filtro)
-        marco = self._marcos_parametro[id_filtro]
-
-        if info_filtro["parametro"] is None:
-            self.var_parametro = None
-            self._etiqueta_valor = None
-            self._info_parametro = None
-            return
-
-        p = info_filtro["parametro"]
-        valor = self._valor_parametro(self._pista_sel, id_filtro)
-        self.var_parametro = tk.DoubleVar(value=valor)
-        self._info_parametro = p
-        fila = ttk.Frame(marco)
-        fila.pack(fill="x")
-        self._etiqueta_valor = ttk.Label(fila, text=self._texto_parametro(p, valor), font=("TkDefaultFont", 9))
-        self._etiqueta_valor.pack(anchor="w")
-        ttk.Scale(
-            fila, from_=p["min"], to=p["max"], variable=self.var_parametro, orient="horizontal",
-            command=lambda v: self._on_param_change(v),
-        ).pack(fill="x")
-
-    def _on_param_change(self, valor):
-        id_filtro = self._filtro_por_pista.get(self._pista_sel, "ninguno")
-        self._valores_parametros[(self._pista_sel, id_filtro)] = float(valor)
-        if self._etiqueta_valor is not None and self._info_parametro is not None:
-            self._etiqueta_valor.config(text=self._texto_parametro(self._info_parametro, float(valor)))
-        self._programar_vista_previa()
-
-    # ---------- vista previa ----------
-
-    def _programar_vista_previa(self, espera_ms=MILISEGUNDOS_DEBOUNCE):
-        if self._debounce_id is not None:
-            self.root.after_cancel(self._debounce_id)
-        self._debounce_id = self.root.after(espera_ms, self._generar_vista_previa)
-
-    def _generar_vista_previa(self, forzar=False):
-        """forzar=True recalcula los filtros aunque nada haya cambiado (p. ej. porque
-        la separación llenó un trozo nuevo de las pistas)."""
-        self._debounce_id = None
-        if self.motor is None or self.info is None:
-            return
-
-        i0, i1 = self._limites_region()
-        elementos = self._snapshot()
-        # Si solo cambió un volumen/M/S, los filtros dan lo mismo que antes: se reutiliza.
-        clave = (i0, i1, tuple((e["pista"]["id"], id(e["pista"]["izq"]), id(e["info"]), e["valor"]) for e in elementos))
-        inicio = time.perf_counter()
-        if not forzar and self._ultimo_procesado is not None and self._ultimo_procesado[0] == clave:
-            procesadas = self._ultimo_procesado[1]
-        else:
-            try:
-                procesadas = self._procesar_snapshot(elementos, i0, i1)
-            except Exception as error:
-                self.etiqueta_estado_previa.config(
-                    text=f"Error al generar la vista previa: {error}", foreground=COLOR_ERROR
-                )
-                return
-            self._ultimo_procesado = (clave, procesadas)
-        duracion = time.perf_counter() - inicio
-        sr = self.info.muestreo
-
-        if self.pistas:
-            carriles = []
-            for e, (izq, _der) in zip(elementos, procesadas):
-                escala = e["vol"] if e["vol"] > 0 else 1.0  # las silenciadas se ven (atenuadas), no desaparecen
-                carriles.append((
-                    e["pista"]["etiqueta"].upper(), e["pista"]["color"],
-                    izq * np.float32(escala), e["ganancia"] == 0.0,
-                ))
-            escala_comun = True
-        else:
-            carriles = [
-                ("ORIGINAL", tema.AZUL, self.izquierdo[i0:i1], False),
-                ("PROCESADO", tema.ROJO, procesadas[0][0], False),
-            ]
-            escala_comun = False
-
-        self._grafica.dibujar(carriles, sr, inicio_s=i0 / sr, escala_comun=escala_comun)
-
-        self.etiqueta_estado_previa.config(
-            text=f"Vista previa actualizada ({duracion * 1000:.1f} ms) · región {self.etiqueta_region.cget('text')}",
-            foreground=COLOR_TEXTO_SUAVE,
-        )
-        self._configurar_audio(procesadas, [e["ganancia"] for e in elementos])
-
-    # ---------- reproducción ----------
-
-    def _configurar_audio(self, procesadas, ganancias):
-        """Deja lista la mezcla para escucharla. Si ya está sonando, el cambio se oye sin cortar."""
-        self._audio_mezcla = (procesadas, ganancias)
-        self._mezclador.configurar(self.info.muestreo, procesadas, ganancias, reiniciar=self._reiniciar_audio)
-        self._reiniciar_audio = False
-        if (
-            self.var_autoreproducir.get()
-            and not self._suspender_auto_reproduccion
-            and not self._mezclador.sonando
-        ):
-            self._iniciar_audio()
-
-    def _iniciar_audio(self):
-        try:
-            self._mezclador.iniciar()
-        except reproductor.ErrorReproduccion as error:
-            messagebox.showerror("No se pudo reproducir", str(error))
-
-    def _detener_audio(self):
-        self._mezclador.detener()
-
-    def _escuchar_mezcla(self):
-        if self._audio_mezcla is None:
-            return
-        procesadas, ganancias = self._audio_mezcla
-        self._mezclador.configurar(self.info.muestreo, procesadas, ganancias, reiniciar=True)
-        self._iniciar_audio()
-
-    def _escuchar_original(self):
-        if self.info is None:
-            return
-        i0, i1 = self._limites_region()
-        izq = self.izquierdo[i0:i1]
-        der = self.derecho[i0:i1] if self.derecho is not None else None
-        self._mezclador.configurar(self.info.muestreo, [(izq, der)], [1.0], reiniciar=True)
-        self._iniciar_audio()
-
-    # ---------- exportar ----------
-
-    def _exportar_mezcla(self):
-        if self.motor is None:
-            messagebox.showwarning("Motor no disponible", "Compila la librería nativa primero.")
-            return
-        ruta = filedialog.asksaveasfilename(defaultextension=".wav", filetypes=[("Audio WAV", "*.wav")])
-        if not ruta:
-            return
-
-        i0, i1 = self._limites_region()
-        n = len(self.izquierdo)
-        solo_region = self.var_solo_region.get() and (i0, i1) != (0, n)
-        sr = self.info.muestreo
-        detalle = (
-            f"solo región {self._formato_tiempo(i0 / sr)}–{self._formato_tiempo(i1 / sr)}"
-            if solo_region else "audio completo"
-        )
-        elementos = self._snapshot()
-        mono_de_origen = self.derecho is None and not self.pistas
-        # El hilo trabaja con esta foto del audio: si mientras tanto se carga otra canción, no se mezclan.
-        original = (self.izquierdo, self.derecho, self.info.muestreo)
-
-        self.boton_exportar.config(state="disabled", text="Procesando audio completo...")
-        self.root.update_idletasks()
-        threading.Thread(
-            target=self._exportar_mezcla_en_hilo,
-            args=(ruta, elementos, original, solo_region, i0, i1, mono_de_origen, detalle),
-            daemon=True,
-        ).start()
-
-    def _exportar_mezcla_en_hilo(self, ruta, elementos, original, solo_region, i0, i1, mono_de_origen, detalle):
-        izquierdo, derecho, muestreo = original
-        try:
-            inicio = time.perf_counter()
-            desde, hasta = (i0, i1) if solo_region else (0, len(izquierdo))
-            procesadas = self._procesar_snapshot(elementos, desde, hasta)
-            izq, der = procesamiento.mezclar(procesadas, [e["ganancia"] for e in elementos])
-            if solo_region:
-                # Fuera de la región queda el audio original, sin tocar.
-                salida_izq = izquierdo.copy()
-                salida_der = (derecho if derecho is not None else izquierdo).copy()
-                salida_izq[desde:hasta] = izq
-                salida_der[desde:hasta] = der
-                izq, der = salida_izq, salida_der
-            audio_io.guardar_wav(ruta, muestreo, izq, None if mono_de_origen else der)
-            duracion = time.perf_counter() - inicio
-        except Exception as error:
-            mensaje = str(error)
-            self.root.after(0, lambda: self._error_exportando(mensaje))
-            return
-        self.root.after(0, lambda: self._exportado_listo(ruta, detalle, duracion))
-
-    def _exportar_pistas(self):
-        if not self.pistas or self.motor is None:
-            return
-        carpeta = filedialog.askdirectory(title="Carpeta donde guardar cada pista")
-        if not carpeta:
-            return
-        elementos = self._snapshot()
-        datos = (len(self.izquierdo), self.info.muestreo, self._nombre_base)
-        self.boton_exportar_pistas.config(state="disabled", text="Guardando pistas...")
-        self.root.update_idletasks()
-        threading.Thread(target=self._exportar_pistas_en_hilo, args=(carpeta, elementos, datos), daemon=True).start()
-
-    def _exportar_pistas_en_hilo(self, carpeta, elementos, datos):
-        n, muestreo, nombre_base = datos
-        try:
-            inicio = time.perf_counter()
-            for e in elementos:
-                izq, der = self._procesar_snapshot([e], 0, n)[0]
-                volumen = np.float32(e["vol"])  # cada pista sale con su filtro y su volumen (sin silenciar/solo)
-                ruta = os.path.join(carpeta, f"{nombre_base}_{e['pista']['id']}.wav")
-                audio_io.guardar_wav(ruta, muestreo, izq * volumen, der * volumen)
-            duracion = time.perf_counter() - inicio
-        except Exception as error:
-            mensaje = str(error)
-            self.root.after(0, lambda: self._error_exportando(mensaje))
-            return
-        self.root.after(0, lambda: self._pistas_exportadas(carpeta, len(elementos), duracion))
-
-    def _error_exportando(self, error):
-        self.boton_exportar.config(state="normal", text="Exportar mezcla como WAV...")
-        self.boton_exportar_pistas.config(
-            state="normal" if self.pistas else "disabled", text="Exportar cada pista por separado..."
-        )
-        messagebox.showerror("Error al exportar", error)
-
-    def _exportado_listo(self, ruta, detalle, duracion):
-        self.boton_exportar.config(state="normal", text="Exportar mezcla como WAV...")
-        self._registrar_log(f"Mezcla exportada: {ruta}  {detalle}  tiempo={duracion:.3f}s")
-        messagebox.showinfo("Exportado", f"Mezcla guardada en:\n{ruta}")
-
-    def _pistas_exportadas(self, carpeta, cantidad, duracion):
-        self.boton_exportar_pistas.config(state="normal", text="Exportar cada pista por separado...")
-        self._registrar_log(f"{cantidad} pistas exportadas en {carpeta}  tiempo={duracion:.3f}s")
-        messagebox.showinfo("Exportado", f"{cantidad} pistas guardadas en:\n{carpeta}")
+    def _abrir_en_moldear(self, pistas):
+        """Abre la canción en el editor: separada en pistas, o entera como una sola."""
+        if not pistas:
+            pistas = [{"id": "cancion", "etiqueta": "Canción", "color": tema.AZUL,
+                       "izq": self.izquierdo, "der": self.derecho}]
+        self.editor.fijar_original(self.izquierdo, self.derecho)
+        self.editor.cargar(self.info, self._nombre_base, pistas, nota=self._estado_separacion)
+        self.pestanas.select(self.editor)
 
 
 def main():

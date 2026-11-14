@@ -20,6 +20,24 @@ FILTROS = {
         "funcion_nativa": None,
         "parametro": None,
     },
+    "graves": {
+        "etiqueta": "Graves (bajos)",
+        "descripcion": "Sube o baja los graves (bombo, bajo), debajo de ~150 Hz.",
+        "funcion_nativa": "graves",
+        "parametro": {"nombre": "Graves", "min": -15.0, "max": 15.0, "default": 6.0, "unidad": " dB", "decimales": 1},
+    },
+    "medios": {
+        "etiqueta": "Medios",
+        "descripcion": "Sube o baja los medios (voces, guitarras), alrededor de 1 kHz.",
+        "funcion_nativa": "medios",
+        "parametro": {"nombre": "Medios", "min": -15.0, "max": 15.0, "default": 3.0, "unidad": " dB", "decimales": 1},
+    },
+    "agudos": {
+        "etiqueta": "Agudos (altos)",
+        "descripcion": "Sube o baja los agudos (platillos, brillo), arriba de ~5 kHz.",
+        "funcion_nativa": "agudos",
+        "parametro": {"nombre": "Agudos", "min": -15.0, "max": 15.0, "default": 4.0, "unidad": " dB", "decimales": 1},
+    },
     "pasa_bajos": {
         "etiqueta": "Pasa-bajos (suavizar)",
         "descripcion": "Atenúa frecuencias altas; suaviza el audio.",

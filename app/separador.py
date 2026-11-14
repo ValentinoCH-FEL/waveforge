@@ -54,6 +54,8 @@ DURACION_MAXIMA_S = 10 * 60  # canciones más largas se rechazan al cargarlas
 _MODELO_DEMUCS = "htdemucs_6s"
 _MODELO_KARAOKE = "UVR_MDXNET_KARA_2.onnx"
 _MODELO_VOZ_ALTA = "vocals_mel_band_roformer.ckpt"  # ~900 MB, se descarga la primera vez que se usa
+# Modo concierto: separa al público (gente cantando, gritos, aplausos) de la voz del escenario.
+_MODELO_PUBLICO = "UVR-MDX-NET_Crowd_HQ_1.onnx"  # ONNX: corre en la tarjeta gráfica como el karaoke
 
 # "rapida": Demucs saca la voz. "alta": RoFormer saca la voz (mejor, pero sin tarjeta
 # NVIDIA tarda varias veces lo que dura la canción).
@@ -83,6 +85,7 @@ _NIVEL_MINIMO_COROS_DB = -30.0
 _ETIQUETAS = {
     "voz_principal": ("Voz principal", tema.AZUL),
     "coros": ("Coros", "#8fd3ff"),
+    "publico": ("Público", "#c4b8a8"),
     "bateria": ("Batería", tema.ROJO),
     "bajo": ("Bajo", "#f2a33a"),
     "guitarra": ("Guitarra", "#b07cf0"),
@@ -152,8 +155,8 @@ def _proveedores_onnx():
     return preferidos[:1] + ["CPUExecutionProvider"]
 
 
-def _crear_separador(modelo, muestreo, prefijo, **parametros):
-    """Un Separator de audio-separator que deja solo la voz en una carpeta temporal propia."""
+def _crear_separador(modelo, muestreo, prefijo, stem="Vocals", **parametros):
+    """Un Separator de audio-separator que deja solo `stem` en una carpeta temporal propia."""
     from audio_separator.separator import Separator
 
     carpeta = tempfile.mkdtemp(prefix=prefijo)
@@ -162,8 +165,11 @@ def _crear_separador(modelo, muestreo, prefijo, **parametros):
         model_file_dir=_CARPETA_MODELOS,
         output_dir=carpeta,
         output_format="WAV",
-        output_single_stem="Vocals",
+        output_single_stem=stem,
         normalization_threshold=1.0,  # no cambiar el volumen: la pista se mezcla con las demás
+        # Guardar cada trozo con soundfile y no con pydub: pydub abre ffmpeg en cada llamada, y en
+        # Windows ese arranque a veces falla (0xC0000142) y cortaba la separación a la mitad.
+        use_soundfile=True,
         sample_rate=muestreo,
         **parametros,
     )
@@ -172,7 +178,7 @@ def _crear_separador(modelo, muestreo, prefijo, **parametros):
     if modelo.endswith(".onnx"):
         separador.onnx_execution_provider = _proveedores_onnx()
     separador.load_model(model_filename=modelo)
-    return separador, muestreo, carpeta
+    return separador, muestreo, carpeta, stem
 
 
 def _obtener_karaoke(muestreo):
@@ -184,6 +190,19 @@ def _obtener_karaoke(muestreo):
             mdx_params={"hop_length": 1024, "segment_size": 256, "overlap": 0.1, "batch_size": 1, "enable_denoise": False},
         )
     return _karaoke
+
+
+_publico = None
+
+
+def _obtener_publico(muestreo):
+    global _publico
+    if _publico is None or _publico[1] != muestreo:
+        _publico = _crear_separador(
+            _MODELO_PUBLICO, muestreo, "estudio_audio_publico_", stem="No Crowd",
+            mdx_params={"hop_length": 1024, "segment_size": 256, "overlap": 0.1, "batch_size": 1, "enable_denoise": False},
+        )
+    return _publico
 
 
 def _obtener_voz_alta(muestreo):
@@ -237,11 +256,11 @@ def _sacar_voz(modelo, audio, muestreo):
     modelo: tupla de _obtener_karaoke o _obtener_voz_alta."""
     import soundfile as sf
 
-    separador, _sr, carpeta = modelo
+    separador, _sr, carpeta, stem = modelo
     entrada = os.path.join(carpeta, "entrada.wav")
     sf.write(entrada, audio.T, muestreo, subtype="FLOAT")
     try:
-        salidas = separador.separate(entrada, custom_output_names={"Vocals": "voz"})
+        salidas = separador.separate(entrada, custom_output_names={stem: "voz"})
         if not salidas:
             raise ErrorSeparacion("El modelo de voz no devolvió ningún resultado.")
         ruta = salidas[0] if os.path.isabs(salidas[0]) else os.path.join(carpeta, salidas[0])
@@ -284,8 +303,11 @@ def _escribir(destino, nuevo, inicio, fundido):
     destino[:, inicio + f:inicio + k] = nuevo[:, f:]
 
 
-def separar_por_partes(izquierdo, derecho, muestreo, al_avanzar=None, cancelado=None, calidad="rapida"):
+def separar_por_partes(izquierdo, derecho, muestreo, al_avanzar=None, cancelado=None, calidad="rapida",
+                       publico=False):
     """Separa la canción en trozos, del inicio al final. calidad: una clave de CALIDADES.
+    publico=True (modo concierto): antes de separar voz principal y coros, se saca al público
+    de la voz; queda en su propia pista "Público".
 
     Tras cada trozo llama al_avanzar(pistas, muestras_procesadas, muestras_totales), donde
     pistas son las que ya se escuchan (sus arreglos se siguen llenando con los trozos
@@ -327,8 +349,13 @@ def separar_por_partes(izquierdo, derecho, muestreo, al_avanzar=None, cancelado=
             inicio, fin, desde, partes = tarea
             try:
                 voz = partes.pop("voz")
+                hay_voz = _db(_rms(voz[:, inicio - desde:fin - desde]), rms_cancion) > _NIVEL_MINIMO_DB
+                partes["publico"] = np.zeros_like(voz)
+                if publico and hay_voz:
+                    sin_publico = _sacar_voz(_obtener_publico(muestreo), voz, muestreo)
+                    partes["publico"], voz = voz - sin_publico, sin_publico
                 # Solo se buscan coros donde hay voz: los tramos instrumentales se saltan.
-                if _db(_rms(voz[:, inicio - desde:fin - desde]), rms_cancion) > _NIVEL_MINIMO_DB:
+                if hay_voz:
                     principal = _sacar_voz(_obtener_karaoke(muestreo), voz, muestreo)
                     partes["voz_principal"], partes["coros"] = principal, voz - principal
                 else:
@@ -390,7 +417,8 @@ def _audibles(pistas, energia, energia_cancion):
     """Las pistas que se escuchan en lo procesado hasta ahora, en orden fijo."""
     resultado = []
     for id_p in _ORDEN:
-        minimo = _NIVEL_MINIMO_COROS_DB if id_p == "coros" else _NIVEL_MINIMO_DB
+        # coros y público siempre traen algo de "resto" de la voz principal: piden más nivel
+        minimo = _NIVEL_MINIMO_COROS_DB if id_p in ("coros", "publico") else _NIVEL_MINIMO_DB
         if energia_cancion > 0 and 10.0 * np.log10(max(energia[id_p], 1e-12) / energia_cancion) > minimo:
             resultado.append(pistas[id_p])
     return resultado
@@ -398,9 +426,10 @@ def _audibles(pistas, energia, energia_cancion):
 
 # ---------- caché: una canción ya separada no se vuelve a procesar ----------
 
-def clave_audio(izquierdo, derecho, muestreo, calidad="rapida"):
+def clave_audio(izquierdo, derecho, muestreo, calidad="rapida", publico=False):
     h = hashlib.sha1()
-    modelos = f"{_MODELO_DEMUCS}|{_MODELO_KARAOKE}" + (f"|{_MODELO_VOZ_ALTA}" if calidad == "alta" else "")
+    modelos = (f"{_MODELO_DEMUCS}|{_MODELO_KARAOKE}" + (f"|{_MODELO_VOZ_ALTA}" if calidad == "alta" else "")
+               + (f"|{_MODELO_PUBLICO}" if publico else ""))
     h.update(f"{modelos}|{muestreo}|{len(izquierdo)}".encode())
     h.update(np.ascontiguousarray(izquierdo).tobytes())
     if derecho is not None:
