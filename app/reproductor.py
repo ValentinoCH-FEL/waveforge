@@ -6,8 +6,8 @@ Mezclador: reproduce en bucle la mezcla de varias pistas y deja cambiar
 el volumen de cada una (o reemplazar las pistas) MIENTRAS suena, sin cortar
 el sonido. Es lo que permite "modular en tiempo real".
 
-Usa sounddevice (PortAudio). Si no está disponible, disponible() devuelve
-False y la app usa el reproductor del sistema como respaldo.
+Usa sounddevice (PortAudio). Si no está instalado, disponible() devuelve
+False y la interfaz avisa cómo instalarlo.
 """
 
 import numpy as np

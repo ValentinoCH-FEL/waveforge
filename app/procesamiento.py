@@ -15,7 +15,7 @@ def aplicar_filtro(motor, info_filtro, parametro, izquierdo, derecho):
 
     Devuelve (resultado_izquierdo, resultado_derecho_o_None).
     """
-    if info_filtro["tipo"] == "ninguno":
+    if info_filtro["funcion_nativa"] is None:
         return izquierdo, derecho
 
     res_izq = motor.aplicar_mono(info_filtro["funcion_nativa"], izquierdo, parametro)

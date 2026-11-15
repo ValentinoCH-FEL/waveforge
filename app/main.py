@@ -12,8 +12,6 @@ Panel interactivo: todo lo demás en una sola pantalla.
 
 import datetime
 import os
-import platform
-import subprocess
 import threading
 import time
 import traceback
@@ -26,14 +24,13 @@ import audio_io
 import filtros_registry
 import graficas
 import importador
-import modo_datos
 import procesamiento
 import reproductor
 import separador
 import tema
 from motor import ErrorMotor, MotorAudio
 
-NOMBRE_APP = "Estudio de Audio"
+NOMBRE_APP = "Waveforge"
 RAIZ_PROYECTO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ARCHIVO_LOG = os.path.join(RAIZ_PROYECTO, "registro.log")
 
@@ -101,7 +98,9 @@ class AppEstudioAudio:
         self.var_solo_region = tk.BooleanVar(value=False)
 
         self._crear_menu()
+        self.root.protocol("WM_DELETE_WINDOW", self._salir)
 
+        self.etiqueta_info = None  # mensaje de estado de la pantalla de carga (solo existe ahí)
         self.contenedor = ttk.Frame(self.root)
         self.contenedor.pack(fill="both", expand=True)
 
@@ -118,6 +117,17 @@ class AppEstudioAudio:
         detalle = "".join(traceback.format_exception(tipo, valor, tb))
         self._registrar_log("EXCEPCION EN LA INTERFAZ:\n" + detalle)
         messagebox.showerror("Error en la interfaz", detalle[-1500:])
+
+    def _salir(self):
+        """Cierra la salida de audio antes de destruir la ventana."""
+        self._detener_audio()
+        self.root.destroy()
+
+    def _mostrar_info(self, texto, color=COLOR_TEXTO_SUAVE):
+        """Escribe en la etiqueta de estado de la pantalla de carga, si está visible.
+        "Cargar archivo..." también se puede usar desde el panel, donde esa etiqueta ya no existe."""
+        if self.etiqueta_info is not None and self.etiqueta_info.winfo_exists():
+            self.etiqueta_info.config(text=texto, foreground=color)
 
     def _limpiar_contenedor(self):
         self._detener_audio()
@@ -138,11 +148,10 @@ class AppEstudioAudio:
         menu_archivo = tk.Menu(barra_menu, tearoff=0)
         menu_archivo.add_command(label="Cargar archivo...", command=self._elegir_archivo)
         menu_archivo.add_separator()
-        menu_archivo.add_command(label="Salir", command=self.root.quit)
+        menu_archivo.add_command(label="Salir", command=self._salir)
         barra_menu.add_cascade(label="Archivo", menu=menu_archivo)
 
         menu_herramientas = tk.Menu(barra_menu, tearoff=0)
-        menu_herramientas.add_command(label="Modo de datos (CSV)...", command=self._abrir_modo_datos)
         menu_herramientas.add_command(label="Ver registro de la sesión...", command=self._ver_registro)
         barra_menu.add_cascade(label="Herramientas", menu=menu_herramientas)
 
@@ -151,12 +160,6 @@ class AppEstudioAudio:
         barra_menu.add_cascade(label="Ayuda", menu=menu_ayuda)
 
         self.root.config(menu=barra_menu)
-
-    def _abrir_modo_datos(self):
-        if self.motor is None:
-            messagebox.showwarning("Motor no disponible", "Compila la librería nativa primero.")
-            return
-        modo_datos.abrir_modo_datos(self.root, self.motor)
 
     def _ver_registro(self):
         ventana = tk.Toplevel(self.root)
@@ -175,8 +178,8 @@ class AppEstudioAudio:
     def _acerca_de(self):
         messagebox.showinfo(
             NOMBRE_APP,
-            f"{NOMBRE_APP}\nMotor de filtros en C++ (ctypes) + Python/Tkinter.\n"
-            "Proyecto del curso Programación de Interfaces y Dispositivos Periféricos.",
+            f"{NOMBRE_APP} — estudio de audio con separación de pistas por IA.\n"
+            "Motor de filtros en C++ (ctypes) + Python/Tkinter.",
         )
 
     # ---------- Paso 1: cargar archivo ----------
@@ -232,11 +235,11 @@ class AppEstudioAudio:
         if not ruta:
             return
 
-        if ruta.lower().endswith(".wav"):
+        if audio_io.es_wav_nativo(ruta):
             self._cargar_ruta_wav(ruta, ruta_original=ruta)
             return
 
-        self.etiqueta_info.config(text="Convirtiendo a WAV...", foreground=COLOR_TEXTO_SUAVE)
+        self._mostrar_info("Convirtiendo a WAV...")
         self.root.update_idletasks()
         threading.Thread(target=self._convertir_en_hilo, args=(ruta,), daemon=True).start()
 
@@ -250,8 +253,7 @@ class AppEstudioAudio:
         self.root.after(0, lambda: self._cargar_ruta_wav(ruta_wav, ruta_original=ruta_origen))
 
     def _error_importacion(self, error):
-        if hasattr(self, "etiqueta_info"):
-            self.etiqueta_info.config(text="No se pudo importar el archivo.", foreground=COLOR_ERROR)
+        self._mostrar_info("No se pudo importar el archivo.", COLOR_ERROR)
         messagebox.showerror("Error al importar", str(error))
 
     def _importar_url(self):
@@ -263,13 +265,13 @@ class AppEstudioAudio:
         if not url:
             return
 
-        self.etiqueta_info.config(text="Descargando audio...", foreground=COLOR_TEXTO_SUAVE)
+        self._mostrar_info("Descargando audio...")
         self.root.update_idletasks()
         threading.Thread(target=self._descargar_en_hilo, args=(url,), daemon=True).start()
 
     def _descargar_en_hilo(self, url):
         def progreso(porcentaje):
-            self.root.after(0, lambda: self.etiqueta_info.config(text=f"Descargando... {porcentaje}"))
+            self.root.after(0, lambda: self._mostrar_info(f"Descargando... {porcentaje}"))
 
         try:
             ruta_wav = importador.descargar_audio(
@@ -291,8 +293,7 @@ class AppEstudioAudio:
                 )
         except audio_io.ErrorFormatoAudio as error:
             messagebox.showerror("Archivo no válido", str(error))
-            if hasattr(self, "etiqueta_info"):
-                self.etiqueta_info.config(text="Ningún archivo cargado todavía.", foreground=COLOR_TEXTO_SUAVE)
+            self._mostrar_info("Ningún archivo cargado todavía.")
             return
         self.info, self.izquierdo, self.derecho = info, izquierdo, derecho
 
@@ -616,7 +617,7 @@ class AppEstudioAudio:
             etiqueta = self._etiquetas_volumen.get(e["pista"]["id"])
             if etiqueta is not None:
                 etiqueta.config(text=f"{round(e['vol'] * 100)}%")
-        if reproductor.disponible() and self._mezclador.cantidad_pistas == len(elementos):
+        if self._mezclador.cantidad_pistas == len(elementos):
             self._mezclador.cambiar_ganancias([e["ganancia"] for e in elementos])
         self._programar_vista_previa(espera_ms=400)
 
@@ -909,8 +910,6 @@ class AppEstudioAudio:
     def _configurar_audio(self, procesadas, ganancias):
         """Deja lista la mezcla para escucharla. Si ya está sonando, el cambio se oye sin cortar."""
         self._audio_mezcla = (procesadas, ganancias)
-        if not reproductor.disponible():
-            return
         self._mezclador.configurar(self.info.muestreo, procesadas, ganancias, reiniciar=self._reiniciar_audio)
         self._reiniciar_audio = False
         if (
@@ -933,12 +932,8 @@ class AppEstudioAudio:
         if self._audio_mezcla is None:
             return
         procesadas, ganancias = self._audio_mezcla
-        if reproductor.disponible():
-            self._mezclador.configurar(self.info.muestreo, procesadas, ganancias, reiniciar=True)
-            self._iniciar_audio()
-        else:
-            izq, der = procesamiento.mezclar(procesadas, ganancias)
-            self._reproducir_con_el_sistema(izq, der)
+        self._mezclador.configurar(self.info.muestreo, procesadas, ganancias, reiniciar=True)
+        self._iniciar_audio()
 
     def _escuchar_original(self):
         if self.info is None:
@@ -946,26 +941,8 @@ class AppEstudioAudio:
         i0, i1 = self._limites_region()
         izq = self.izquierdo[i0:i1]
         der = self.derecho[i0:i1] if self.derecho is not None else None
-        if reproductor.disponible():
-            self._mezclador.configurar(self.info.muestreo, [(izq, der)], [1.0], reiniciar=True)
-            self._iniciar_audio()
-        else:
-            self._reproducir_con_el_sistema(izq, der)
-
-    def _reproducir_con_el_sistema(self, izquierdo, derecho):
-        """Respaldo si no hay sounddevice: usa el reproductor de Windows (no es en vivo)."""
-        ruta_temporal = os.path.join(RAIZ_PROYECTO, "_reproduccion_temp.wav")
-        try:
-            audio_io.guardar_wav(ruta_temporal, self.info.muestreo, izquierdo, derecho)
-            sistema = platform.system()
-            if sistema == "Windows":
-                os.startfile(ruta_temporal)  # noqa: abre con el reproductor por defecto de Windows
-            elif sistema == "Darwin":
-                subprocess.Popen(["afplay", ruta_temporal])
-            else:
-                subprocess.Popen(["xdg-open", ruta_temporal])
-        except Exception as error:
-            messagebox.showerror("No se pudo reproducir", f"No se pudo reproducir el audio:\n{error}")
+        self._mezclador.configurar(self.info.muestreo, [(izq, der)], [1.0], reiniciar=True)
+        self._iniciar_audio()
 
     # ---------- exportar ----------
 
@@ -987,29 +964,32 @@ class AppEstudioAudio:
         )
         elementos = self._snapshot()
         mono_de_origen = self.derecho is None and not self.pistas
+        # El hilo trabaja con esta foto del audio: si mientras tanto se carga otra canción, no se mezclan.
+        original = (self.izquierdo, self.derecho, self.info.muestreo)
 
         self.boton_exportar.config(state="disabled", text="Procesando audio completo...")
         self.root.update_idletasks()
         threading.Thread(
             target=self._exportar_mezcla_en_hilo,
-            args=(ruta, elementos, solo_region, i0, i1, mono_de_origen, detalle),
+            args=(ruta, elementos, original, solo_region, i0, i1, mono_de_origen, detalle),
             daemon=True,
         ).start()
 
-    def _exportar_mezcla_en_hilo(self, ruta, elementos, solo_region, i0, i1, mono_de_origen, detalle):
+    def _exportar_mezcla_en_hilo(self, ruta, elementos, original, solo_region, i0, i1, mono_de_origen, detalle):
+        izquierdo, derecho, muestreo = original
         try:
             inicio = time.perf_counter()
-            desde, hasta = (i0, i1) if solo_region else (0, len(self.izquierdo))
+            desde, hasta = (i0, i1) if solo_region else (0, len(izquierdo))
             procesadas = self._procesar_snapshot(elementos, desde, hasta)
             izq, der = procesamiento.mezclar(procesadas, [e["ganancia"] for e in elementos])
             if solo_region:
                 # Fuera de la región queda el audio original, sin tocar.
-                salida_izq = self.izquierdo.copy()
-                salida_der = (self.derecho if self.derecho is not None else self.izquierdo).copy()
+                salida_izq = izquierdo.copy()
+                salida_der = (derecho if derecho is not None else izquierdo).copy()
                 salida_izq[desde:hasta] = izq
                 salida_der[desde:hasta] = der
                 izq, der = salida_izq, salida_der
-            audio_io.guardar_wav(ruta, self.info.muestreo, izq, None if mono_de_origen else der)
+            audio_io.guardar_wav(ruta, muestreo, izq, None if mono_de_origen else der)
             duracion = time.perf_counter() - inicio
         except Exception as error:
             mensaje = str(error)
@@ -1024,19 +1004,20 @@ class AppEstudioAudio:
         if not carpeta:
             return
         elementos = self._snapshot()
+        datos = (len(self.izquierdo), self.info.muestreo, self._nombre_base)
         self.boton_exportar_pistas.config(state="disabled", text="Guardando pistas...")
         self.root.update_idletasks()
-        threading.Thread(target=self._exportar_pistas_en_hilo, args=(carpeta, elementos), daemon=True).start()
+        threading.Thread(target=self._exportar_pistas_en_hilo, args=(carpeta, elementos, datos), daemon=True).start()
 
-    def _exportar_pistas_en_hilo(self, carpeta, elementos):
+    def _exportar_pistas_en_hilo(self, carpeta, elementos, datos):
+        n, muestreo, nombre_base = datos
         try:
             inicio = time.perf_counter()
-            n = len(self.izquierdo)
             for e in elementos:
                 izq, der = self._procesar_snapshot([e], 0, n)[0]
                 volumen = np.float32(e["vol"])  # cada pista sale con su filtro y su volumen (sin silenciar/solo)
-                ruta = os.path.join(carpeta, f"{self._nombre_base}_{e['pista']['id']}.wav")
-                audio_io.guardar_wav(ruta, self.info.muestreo, izq * volumen, der * volumen)
+                ruta = os.path.join(carpeta, f"{nombre_base}_{e['pista']['id']}.wav")
+                audio_io.guardar_wav(ruta, muestreo, izq * volumen, der * volumen)
             duracion = time.perf_counter() - inicio
         except Exception as error:
             mensaje = str(error)

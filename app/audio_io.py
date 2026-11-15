@@ -1,7 +1,7 @@
 """
 audio_io.py — cargar/guardar WAV y validar el formato.
 
-Solo trabaja con WAV PCM de 16 bits, mono o estéreo (requisitos 2 y 9).
+Solo trabaja con WAV PCM de 16 bits, mono o estéreo.
 Convierte entre enteros de 16 bits (lo que trae el archivo) y floats
 en el rango [-1.0, 1.0] (lo que esperan los filtros en C++).
 """
@@ -12,17 +12,15 @@ import numpy as np
 
 
 class ErrorFormatoAudio(Exception):
-    """Formato de archivo no soportado (requisito 2: validar formato)."""
-    pass
+    """Formato de archivo no soportado."""
 
 
 class InfoAudio:
-    def __init__(self, canales, muestreo, ancho_muestra, cantidad_frames, ruta):
+    def __init__(self, canales, muestreo, ancho_muestra, cantidad_frames):
         self.canales = canales
         self.muestreo = muestreo
         self.ancho_muestra = ancho_muestra
         self.cantidad_frames = cantidad_frames
-        self.ruta = ruta
 
     @property
     def duracion_segundos(self):
@@ -46,13 +44,24 @@ class InfoAudio:
         return f"{bytes_totales:.1f} TB"
 
 
+MUESTREO_NATIVO = 44100  # todo el audio se lleva a esto (los filtros en C++ lo suponen)
+
+
+def es_wav_nativo(ruta):
+    """True si el archivo ya es WAV PCM 16 bits a 44100 Hz (se puede cargar sin convertir)."""
+    try:
+        with wave.open(ruta, "rb") as wf:
+            return wf.getsampwidth() == 2 and wf.getframerate() == MUESTREO_NATIVO and wf.getnchannels() in (1, 2)
+    except (wave.Error, EOFError, OSError):
+        return False  # p. ej. WAV en float o con cabecera extendida: que ffmpeg lo convierta
+
+
 def cargar_wav(ruta, limite_mb=200):
     """Carga un WAV y devuelve (info, izquierdo, derecho).
 
     derecho es None si el audio es mono.
     Lanza ErrorFormatoAudio si el archivo no es PCM de 16 bits, o si
-    excede limite_mb (requisito no funcional 10: validar límites antes
-    de reservar memoria grande).
+    excede limite_mb (se valida antes de reservar memoria grande).
     """
     try:
         with wave.open(ruta, "rb") as wf:
@@ -82,7 +91,7 @@ def cargar_wav(ruta, limite_mb=200):
     enteros = np.frombuffer(datos_crudos, dtype=np.int16)
     flotantes = enteros.astype(np.float32) / 32768.0
 
-    info = InfoAudio(canales, muestreo, ancho, n_frames, ruta)
+    info = InfoAudio(canales, muestreo, ancho, n_frames)
 
     if canales == 1:
         return info, flotantes, None
