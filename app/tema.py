@@ -33,7 +33,7 @@ def aplicar(root):
 
     root.configure(bg=FONDO)
 
-    # --- widgets clásicos de Tk (menús, cuadros de texto, diálogos, barra de matplotlib) ---
+    # --- widgets clásicos de Tk (menús, cuadros de texto, diálogos) ---
     opciones = {
         "*Background": FONDO,
         "*Foreground": TEXTO,
@@ -154,6 +154,18 @@ def aplicar(root):
     estilo.configure(
         "Horizontal.TProgressbar", background=AZUL, troughcolor=ONDA_FONDO, bordercolor=BORDE,
         lightcolor=AZUL, darkcolor=AZUL,
+    )
+
+    # Pestañas (Separación con IA / Estudio)
+    estilo.configure("TNotebook", background=FONDO, bordercolor=BORDE, lightcolor=FONDO, darkcolor=FONDO,
+                     tabmargins=(12, 8, 12, 0))
+    estilo.configure("TNotebook.Tab", background=PANEL, foreground=TEXTO_SUAVE, bordercolor=BORDE,
+                     lightcolor=PANEL, darkcolor=PANEL, padding=(14, 6), font=("TkDefaultFont", 10, "bold"))
+    estilo.map(
+        "TNotebook.Tab",
+        background=[("selected", PANEL_2), ("active", "#2e2e35")],
+        foreground=[("selected", AZUL), ("active", TEXTO)],
+        lightcolor=[("selected", AZUL)],
     )
 
     estilo.configure("TSeparator", background=BORDE)
