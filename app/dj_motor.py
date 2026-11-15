@@ -77,17 +77,20 @@ def compatibles(bpm_a, bpm_b):
     return abs(bpm_b / bpm_a - 1.0) <= MAX_DIFERENCIA_TEMPO
 
 
-def planear(ana_a, ana_b, rng, pesos=None):
-    """Decide dónde y cómo mezclar. Devuelve un plan (dict) o lanza ErrorMezcla si no hay lugar."""
+def planear(ana_a, ana_b, rng, pesos=None, beats=BEATS, salir_s=None):
+    """Decide dónde y cómo mezclar. Devuelve un plan (dict) o lanza ErrorMezcla si no hay lugar.
+    beats: largo de la transición. salir_s: segundo de A donde debe terminar la mezcla (estilo
+    aprendido de un DJ que cambia rápido); por defecto, cerca del final de la canción."""
     beats_a, beats_b = ana_a["beats"], ana_b["beats"]
     # A: la mezcla termina ~1 s antes de que se acabe la música, y empieza en un "uno" de compás
-    i_fin = int(np.searchsorted(beats_a, ana_a["fin_s"] - 1.0)) - 1
-    i0 = i_fin - BEATS
+    limite = ana_a["fin_s"] - 1.0 if salir_s is None else min(salir_s, ana_a["fin_s"] - 1.0)
+    i_fin = int(np.searchsorted(beats_a, limite)) - 1
+    i0 = i_fin - beats
     i0 -= (i0 - ana_a["fase"]) % 4
     # B: entra en su primer "uno" con música
     j0 = int(np.searchsorted(beats_b, ana_b["inicio_s"]))
     j0 += (ana_b["fase"] - j0) % 4
-    if i0 < 8 or j0 + BEATS + 4 >= len(beats_b):
+    if i0 < 8 or j0 + beats + 4 >= len(beats_b):
         raise ErrorMezcla("Alguna de las dos canciones es muy corta para mezclarla.")
 
     sincronizada = compatibles(ana_a["bpm"], ana_b["bpm"])
@@ -96,8 +99,8 @@ def planear(ana_a, ana_b, rng, pesos=None):
         receta = str(rng.choice(SINCRONIZADAS, p=p / p.sum()))
     else:
         receta = "eco_libre"
-    return {"i0": i0, "j0": j0, "receta": receta, "sincronizada": sincronizada,
-            "a0": int(round(beats_a[i0] * SR)), "a1": int(round(beats_a[i0 + BEATS] * SR))}
+    return {"i0": i0, "j0": j0, "receta": receta, "sincronizada": sincronizada, "beats": beats,
+            "a0": int(round(beats_a[i0] * SR)), "a1": int(round(beats_a[i0 + beats] * SR))}
 
 
 def separar_tramo(audio):
@@ -133,6 +136,7 @@ def preparar(audio_a, ana_a, audio_b, ana_b, plan, cancelado=None):
     """Construye el audio de la transición según el plan.
     Devuelve {mezcla: [m, 2], b_continua: muestra de B donde sigue sola a velocidad normal}."""
     a0, a1 = plan["a0"], plan["a1"]
+    BEATS = plan.get("beats", 32)  # largo de esta transición (tapa el valor por defecto del módulo)
     n = a1 - a0
     receta = RECETAS[plan["receta"]]
     beats_a = ana_a["beats"][plan["i0"]:plan["i0"] + BEATS + 1] * SR - a0      # beats de A, relativos

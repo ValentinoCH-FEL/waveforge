@@ -7,9 +7,11 @@ dj_ui.py — pestaña "DJ": elegir una carpeta o USB con música y dejar que el 
     👍 / 👎 para calificar cada transición (con eso el DJ va aprendiendo tu gusto).
 """
 
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import dj_aprender
 import dj_sesion
 import tema
 from widgets import BotonAnimado, MedidorVolumen
@@ -181,6 +183,27 @@ class PestanaDJ(ttk.Frame):
                                       wraplength=400)
         self.etiqueta_voto.pack(fill="x", pady=(6, 0))
 
+        # --- aprender el estilo de un DJ a partir de una de sus mezclas ---
+        tk.Label(caja, text="ESTILO APRENDIDO DE UN DJ", bg=tema.FONDO, fg=tema.TEXTO_SUAVE,
+                 font=("TkDefaultFont", 8, "bold")).pack(anchor="w", pady=(18, 4))
+        fila_estilo = tk.Frame(caja, bg=tema.FONDO)
+        fila_estilo.pack(fill="x")
+        self.boton_aprender = BotonAnimado(fila_estilo, "🎓  Aprender de una mezcla...", self._aprender, alto=32,
+                                           ayuda="Elige el audio (MP3, WAV...) o el video de un DJ mezclando.\n"
+                                                 "Se analiza cada cuánto cambia de canción, cuánto duran sus\n"
+                                                 "transiciones y qué técnica usa.")
+        self.boton_aprender.pack(side="left")
+        self.var_estilo = tk.BooleanVar(value=False)
+        self.check_estilo = ttk.Checkbutton(caja, text="Mezclar con este estilo", variable=self.var_estilo,
+                                            command=self._aplicar_estilo)
+        self.check_estilo.pack(anchor="w", pady=(6, 0))
+        self.etiqueta_estilo = tk.Label(caja, text="", bg=tema.FONDO, fg=tema.TEXTO_SUAVE, anchor="w",
+                                        justify="left", wraplength=400, font=("TkDefaultFont", 8))
+        self.etiqueta_estilo.pack(fill="x")
+        self._perfil = None
+        guardados = dj_aprender.cargar_todos()
+        self._mostrar_perfil(guardados[0] if guardados else None)
+
         tk.Label(caja, bg=tema.FONDO, fg=tema.TEXTO_SUAVE, anchor="w", justify="left", wraplength=400,
                  font=("TkDefaultFont", 8),
                  text="La IA separa solo los segundos de cada mezcla, mientras suena la canción anterior, y cada "
@@ -245,6 +268,65 @@ class PestanaDJ(ttk.Frame):
         self.sesion.plan = [{"genero": None, "limite": None}]
         self._plan_inicial = True
         self._mostrar_plan()
+
+    # ---------- estilo aprendido ----------
+
+    def _mostrar_perfil(self, perfil):
+        self._perfil = perfil if perfil and perfil.get("resumen") else None
+        if self._perfil is None:
+            self.etiqueta_estilo.config(text="Todavía no se aprendió ningún estilo." if perfil is None
+                                        else "En esa mezcla no se detectaron cambios de canción.")
+            self.check_estilo.state(["disabled"])
+            self.var_estilo.set(False)
+        else:
+            self.etiqueta_estilo.config(text=f"«{perfil['nombre']}»\n{dj_aprender.describir(perfil)}")
+            self.check_estilo.state(["!disabled"])
+        self._aplicar_estilo()
+
+    def _aplicar_estilo(self):
+        self.sesion.estilo = self._perfil["resumen"] if self._perfil and self.var_estilo.get() else None
+
+    def _aprender(self):
+        ruta = filedialog.askopenfilename(title="Mezcla de un DJ (audio o video)", filetypes=[
+            ("Audio y video", "*.mp3 *.wav *.m4a *.flac *.ogg *.aac *.mp4 *.mkv *.mov *.webm"),
+            ("Todos los archivos", "*.*")])
+        if ruta:
+            self.aprender_de(ruta)
+
+    def aprender_de(self, ruta):
+        self.boton_aprender.habilitar(False)
+        self.etiqueta_estilo.config(text="Analizando la mezcla...")
+
+        def avance(fraccion, texto):
+            try:
+                self.after(0, lambda: self.etiqueta_estilo.config(text=f"{texto} {fraccion * 100:.0f}%"))
+            except RuntimeError:
+                pass
+
+        def trabajo():
+            try:
+                perfil = dj_aprender.analizar_mezcla(ruta, al_avanzar=avance)
+                dj_aprender.guardar(perfil)
+                fin = lambda: self._aprendido(perfil, None)
+            except Exception as error:
+                mensaje = str(error)
+                fin = lambda: self._aprendido(None, mensaje)
+            try:
+                self.after(0, fin)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=trabajo, daemon=True).start()
+
+    def _aprendido(self, perfil, error):
+        self.boton_aprender.habilitar(True)
+        if error:
+            self.etiqueta_estilo.config(text="")
+            messagebox.showerror("Aprender de una mezcla", error)
+            return
+        self.var_estilo.set(bool(perfil.get("resumen")))
+        self._mostrar_perfil(perfil)
+        self._registrar_log(f"DJ: estilo aprendido de «{perfil['nombre']}»: {perfil.get('resumen')}")
 
     # ---------- USB ----------
 

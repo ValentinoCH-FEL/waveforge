@@ -77,9 +77,15 @@ separa:
 - 👍 / 👎 en cada mezcla: las recetas con más votos buenos se eligen más
   seguido, y el registro (`dj_transiciones.jsonl`) queda como datos para
   entrenar después un modelo con tu gusto.
+- **Aprender de un DJ**: con el audio de una de sus mezclas (sin las
+  canciones por separado) se estima cada cuánto cambia de canción,
+  cuánto duran sus transiciones y qué técnica usa (corte, fundido o
+  quitando los graves). Ese perfil se guarda y el DJ lo aplica al
+  mezclar. Es una estimación: en mezclas de prueba con respuesta
+  conocida encontró 26 de 36 cambios de canción, con 5 falsos.
 - Pendiente: estructura de la canción (intro, coro, final), mezclas por
-  palabras de la letra, aprender de videos de DJs reales, datos de
-  Rekordbox y música en línea.
+  palabras de la letra, medir lo que el DJ hace con cada canción (hacen
+  falta las canciones originales), datos de Rekordbox y música en línea.
 
 Guarda un registro (`registro.log`) de lo que se hizo y cuándo.
 
@@ -114,6 +120,7 @@ Guarda un registro (`registro.log`) de lo que se hizo y cuándo.
 │   ├── ediciones.py          # ediciones por tramo (sin Tk) + resumen de ondas
 │   ├── identificador.py      # huella de voz del cantante (WeSpeaker, ONNX)
 │   ├── dj_ui.py              # pestaña DJ: biblioteca, cabina y votos
+│   ├── dj_aprender.py        # perfil de estilo a partir de la mezcla de un DJ
 │   ├── dj_sesion.py          # sesión DJ: reproduce, prepara la siguiente mezcla, descarta lo usado
 │   ├── dj_motor.py           # transiciones con stems (recetas, alineación beat a beat)
 │   ├── dj_analisis.py        # BPM, grilla de beats y tonalidad de cada canción

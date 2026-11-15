@@ -70,6 +70,7 @@ class SesionDJ:
         # limite None = sin límite, ("min", 30) o ("canciones", 5). El último bloque no se termina.
         self.plan = [{"genero": None, "limite": None}]
         self.preferir_artista = False
+        self.estilo = None            # resumen de un perfil aprendido de un DJ (dj_aprender), o None
         self._bloque = 0
         self._bloque_de = {}
         self._bloque_inicio = 0.0
@@ -290,7 +291,7 @@ class SesionDJ:
 
     def _tramo_cancion(self, indice, audio, desde=0):
         return {"tipo": "cancion", "indice": indice, "titulo": self.biblioteca[indice]["titulo"],
-                "audio": audio, "pos": int(desde), "fin": len(audio)}
+                "audio": audio, "pos": int(desde), "fin": len(audio), "desde_s": desde / SR}
 
     def _trabajo(self, indice, parar):
         try:
@@ -349,7 +350,16 @@ class SesionDJ:
             try:
                 inicio = time.perf_counter()
                 audio_b, ana_b = self._cargar(indice_b)
-                plan = dj_motor.planear(ana_a, ana_b, self._rng, pesos_recetas())
+                pesos, beats, salir_s = pesos_recetas(), dj_motor.BEATS, None
+                if self.estilo:  # mezclar como el DJ del que se aprendió
+                    beats = self.estilo["beats_motor"]
+                    # cuánto deja sonar cada canción (mínimo 50 s: hay que alcanzar a preparar la mezcla)
+                    salir_s = tramo_a["desde_s"] + max(self.estilo["segundos_por_cancion"], 50.0)
+                    t = self.estilo["tecnicas"]
+                    gusto = {"eco": 0.3 + 2 * t["corte"], "cambio_de_bajo": 0.3 + 2 * t["graves"],
+                             "sin_bateria": 0.3 + t["graves"] + t["fundido"], "voz_sobre_ritmo": 0.3 + 2 * t["fundido"]}
+                    pesos = {r: pesos.get(r, 0.5) * g for r, g in gusto.items()}
+                plan = dj_motor.planear(ana_a, ana_b, self._rng, pesos, beats=beats, salir_s=salir_s)
                 resultado = dj_motor.preparar(audio_a, ana_a, audio_b, ana_b, plan, cancelado=parar.is_set)
                 if resultado is None:
                     return None
@@ -366,7 +376,8 @@ class SesionDJ:
                         "camelot_a": a["camelot"], "camelot_b": cancion_b["camelot"],
                         "genero_a": a["genero"], "genero_b": cancion_b["genero"],
                         "energia_a": a["energia"], "energia_b": cancion_b["energia"],
-                        "receta": plan["receta"], "sincronizada": plan["sincronizada"]}
+                        "receta": plan["receta"], "sincronizada": plan["sincronizada"], "beats": plan["beats"],
+                        "estilo": bool(self.estilo)}
             nombre = dj_motor.RECETAS[plan["receta"]]["nombre"]
             tramo_mezcla = {"tipo": "mezcla", "indice": indice_b, "titulo": f"{a['titulo']}  →  {cancion_b['titulo']}",
                             "audio": resultado["mezcla"], "pos": 0, "fin": len(resultado["mezcla"]),
