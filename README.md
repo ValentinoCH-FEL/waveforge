@@ -16,7 +16,12 @@ Interfaces y Dispositivos Periféricos.
   - Demucs (modelo de 6 pistas) separa voz, batería, bajo, guitarra,
     piano y otros instrumentos.
   - Donde hay voz, un modelo karaoke (MDX-Net) la parte en **voz
-    principal** y **coros**.
+    principal** y **coros**. En Windows corre en la tarjeta gráfica
+    (DirectML: NVIDIA, AMD o Intel, también las integradas), ~3 veces más
+    rápido que en el procesador, y al mismo tiempo que Demucs.
+  - **Calidad alta** (menú Separación): la voz la saca Mel-Band RoFormer,
+    bastante más limpia que Demucs. Sin tarjeta NVIDIA es lenta (varias
+    veces lo que dura la canción); la primera vez descarga ~900 MB.
   - Solo aparecen las pistas que realmente suenan (si la canción no
     tiene coros o piano, esas pistas no se muestran).
   - Se procesa por trozos: los primeros segundos están listos en
@@ -54,64 +59,81 @@ Interfaces y Dispositivos Periféricos.
 │   ├── audio_io.py           # cargar/guardar/validar WAV
 │   ├── graficas.py           # ondas de cada pista (matplotlib)
 │   └── tema.py               # colores y estilos de la interfaz
+├── iniciar.bat / iniciar.sh  # doble clic: instala lo que falte y abre la app
 ├── requirements.txt
 └── README.md
 ```
 
 ## Cómo correrlo
 
-### 1. Compilar el motor nativo (una sola vez por plataforma)
+**Windows:** doble clic en `iniciar.bat`. **Mac/Linux:** `./iniciar.sh`.
 
-Necesitas un compilador de C++. En Windows, instala MinGW vía
-[MSYS2](https://www.msys2.org/) (`pacman -S mingw-w64-ucrt-x86_64-gcc`)
-y agrega su `bin` al PATH. En Mac ya viene con las Command Line Tools
-de Xcode (`xcode-select --install`). En Linux instala `g++` con el
-gestor de paquetes de tu distro.
+La primera vez prepara todo solo (tarda varios minutos) y después solo
+abre la app:
 
-Luego corre el script de tu sistema, que está en `native/`:
+1. Crea un entorno de Python en `.venv` dentro de la carpeta del proyecto.
+2. Instala las dependencias de `requirements.txt`. Vuelve a hacerlo solo
+   cuando ese archivo cambia (por ejemplo, tras un `git pull`).
+3. Compila el motor de filtros en C++ si todavía no está compilado.
+4. Si falta ffmpeg, ofrece instalarlo con `winget` (en Mac/Linux, avisa
+   cómo instalarlo).
 
-- Windows: `build_windows.bat`
-- Mac: `./build_mac.sh`
-- Linux: `./build_linux.sh`
-
-Cada uno genera el archivo correspondiente (`filtro.dll`,
-`libfiltro.dylib` o `libfiltro.so`) **dentro de `native/`** — ahí es
-donde `motor.py` lo busca.
-
-### 2. Instalar las dependencias
-
-```
-pip install -r requirements.txt
-```
-
-También hace falta **ffmpeg** (para convertir archivos y descargar de
-YouTube): en Windows, `winget install ffmpeg`.
-
-Tkinter viene incluido con Python en Windows y Mac. En Linux puede que
-necesites instalarlo aparte (`sudo apt install python3-tk` en
-Debian/Ubuntu).
-
-**Python 3.14 en Windows:** `audio-separator` pide `diffq-fixed`, que
-no compila en esa versión, y `beartype<0.19`, que no funciona en ella.
-Instálalo sin dependencias y agrega las que necesita a mano:
-
-```
-pip install audio-separator --no-deps
-pip install audioop-lts "beartype>=0.22" einops julius librosa ml_collections onnx-weekly onnx2torch-py313 onnxruntime pydub pyyaml resampy "rotary-embedding-torch<0.7" samplerate==0.1.0 scipy soundfile audioread
-```
+yt-dlp (descargas de YouTube) se mantiene al día solo: la app lo revisa
+una vez al día en segundo plano, porque YouTube cambia seguido y las
+versiones viejas dejan de descargar.
 
 La primera vez que se separa una canción se descargan los modelos de
-IA (~100 MB) en `~/.cache/estudio_audio_modelos`.
+IA (~140 MB; ~900 MB más si usas la calidad alta) en
+`~/.cache/estudio_audio_modelos`.
 
-### 3. Ejecutar
+### Lo que el script no instala
+
+- **Python 3.11 o más nuevo** (probado con 3.14):
+  https://www.python.org/downloads/ o `winget install Python.Python.3.14`.
+  En Linux puede hacer falta Tkinter aparte (`sudo apt install python3-tk`).
+- **Compilador de C++**, solo para compilar el motor la primera vez. En
+  Windows, MinGW vía [MSYS2](https://www.msys2.org/)
+  (`pacman -S mingw-w64-ucrt-x86_64-gcc`), agregando `C:\msys64\ucrt64\bin`
+  al PATH. En Mac viene con `xcode-select --install`; en Linux, `g++`.
+  Sin compilador la app abre igual, pero sin efectos.
+
+### A mano (sin los scripts)
 
 ```
+python -m venv .venv
+.venv\Scripts\activate          (Mac/Linux: source .venv/bin/activate)
+pip install -r requirements.txt
+pip install --no-deps audio-separator
+native\build_windows.bat        (o native/build_mac.sh, native/build_linux.sh)
 python app/main.py
 ```
 
-Sin tarjeta gráfica NVIDIA, la separación completa tarda más o menos
-lo que dura la canción; con una NVIDIA (y PyTorch con CUDA) es varias
-veces más rápida, sin cambiar nada del código.
+`audio-separator` va con `--no-deps` porque sus dependencias declaradas
+no instalan en Python 3.14 (`diffq-fixed` no compila y pide
+`beartype<0.19`); `requirements.txt` ya lista las que de verdad necesita.
+
+## Qué PC hace falta
+
+Medido en un Ryzen 5 5600G (6 núcleos, gráficos Radeon integrados, sin
+NVIDIA) con 16 GB de RAM:
+
+| | Calidad rápida | Calidad alta (RoFormer) |
+|---|---|---|
+| Primeros segundos audibles | ~20 s | ~1-2 min |
+| Canción de 4 min completa | ~3 min (0.7-0.8x) | ~25 min (~6x) |
+| RAM usada por la IA | ~2.5 GB | ~3 GB |
+
+- **Mínimo:** procesador de 4 núcleos, 8 GB de RAM, ~3 GB libres de
+  disco (dependencias + modelos), Windows 10/11, macOS o Linux. Funciona,
+  pero la separación tarda más que la canción.
+- **Recomendado:** 6 núcleos o más y 16 GB de RAM; en Windows, cualquier
+  tarjeta gráfica (aunque sea integrada) acelera el karaoke.
+- **Ideal:** tarjeta NVIDIA con 6 GB o más de memoria y PyTorch con CUDA:
+  la separación es varias veces más rápida que la canción y la calidad
+  alta se vuelve práctica, sin cambiar nada del código.
+
+Convertir el archivo no es lo lento: ffmpeg pasa una canción de 4 min a
+WAV en ~0.2 s. El tiempo se va en la separación con IA.
 
 ## Cómo agregar un filtro nuevo (pensado para escalar)
 

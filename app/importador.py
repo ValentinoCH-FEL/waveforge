@@ -15,11 +15,15 @@ Uso personal de pruebas: lo que se descargue no debe redistribuirse,
 por los derechos de autor del contenido original.
 """
 
+import importlib
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 
 from audio_io import MUESTREO_NATIVO
 
@@ -80,18 +84,82 @@ def convertir_a_wav(ruta_origen):
     return destino
 
 
+# ---------- yt-dlp siempre instalado y al día ----------
+# YouTube cambia seguido y las versiones viejas de yt-dlp dejan de poder descargar.
+# Por eso la app lo instala si falta y lo actualiza sola (una vez al día, en segundo plano).
+
+_MARCA_REVISION = os.path.join(os.path.expanduser("~"), ".cache", "waveforge_yt_dlp_revisado")
+_HORAS_ENTRE_REVISIONES = 24
+_actualizacion_lista = threading.Event()
+_actualizacion_lista.set()  # nada pendiente hasta que se lance una actualización
+
+
+def _pip_instalar_yt_dlp():
+    """Instala o actualiza yt-dlp en el mismo Python que corre la app. True si funcionó."""
+    try:
+        resultado = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "-q", "-U", "yt-dlp"],
+            capture_output=True, text=True, timeout=180,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),  # sin ventana negra en Windows
+        )
+        return resultado.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def actualizar_yt_dlp_en_segundo_plano():
+    """Llamar al abrir la app. Si pasó un día desde la última revisión, actualiza yt-dlp
+    en un hilo aparte (si no hay internet, no pasa nada: se reintenta la próxima vez)."""
+    try:
+        if time.time() - os.path.getmtime(_MARCA_REVISION) < _HORAS_ENTRE_REVISIONES * 3600:
+            return
+    except OSError:
+        pass  # nunca se revisó
+
+    def trabajo():
+        try:
+            if _pip_instalar_yt_dlp():
+                os.makedirs(os.path.dirname(_MARCA_REVISION), exist_ok=True)
+                with open(_MARCA_REVISION, "w") as marca:
+                    marca.write(time.strftime("%Y-%m-%d %H:%M"))
+        finally:
+            _actualizacion_lista.set()
+
+    _actualizacion_lista.clear()
+    threading.Thread(target=trabajo, daemon=True).start()
+
+
+def _importar_yt_dlp(callback_progreso):
+    # Si se está actualizando, se espera a que termine (importarlo a medio instalar fallaría).
+    if not _actualizacion_lista.is_set() and callback_progreso:
+        callback_progreso("actualizando yt-dlp...")
+    _actualizacion_lista.wait(timeout=180)
+    try:
+        import yt_dlp
+        return yt_dlp
+    except ImportError:
+        pass
+    if callback_progreso:
+        callback_progreso("instalando yt-dlp (solo esta vez)...")
+    if _pip_instalar_yt_dlp():
+        importlib.invalidate_caches()
+        try:
+            import yt_dlp
+            return yt_dlp
+        except ImportError:
+            pass
+    raise ErrorImportacion(
+        "No se pudo instalar yt-dlp automáticamente (¿hay internet?).\n"
+        "Instálalo a mano con: pip install -U yt-dlp"
+    )
+
+
 def descargar_audio(url, callback_progreso=None, duracion_maxima_s=None):
     """Descarga el audio de UN SOLO video (ignora parámetros de playlist
     en la URL) y lo deja como WAV, usando la librería yt-dlp. Requiere
     conexión a internet y ffmpeg instalado. Si el video dura más que
     duracion_maxima_s, se rechaza antes de descargar nada."""
-    try:
-        import yt_dlp
-    except ImportError:
-        raise ErrorImportacion(
-            "Falta el paquete yt-dlp.\n"
-            "Instálalo con: pip install yt-dlp"
-        )
+    yt_dlp = _importar_yt_dlp(callback_progreso)
 
     if not _ffmpeg_disponible():
         raise ErrorImportacion(
@@ -135,7 +203,11 @@ def descargar_audio(url, callback_progreso=None, duracion_maxima_s=None):
     except ErrorImportacion:
         raise
     except Exception as error:
-        raise ErrorImportacion(f"No se pudo descargar el audio:\n{_limpiar_texto_progreso(str(error))}")
+        detalle = _limpiar_texto_progreso(str(error))
+        # Lo más común cuando YouTube cambia algo: yt-dlp quedó viejo. Se actualiza para la próxima.
+        if _pip_instalar_yt_dlp():
+            detalle += "\n\nSe actualizó yt-dlp: cierra y vuelve a abrir la app, y prueba de nuevo."
+        raise ErrorImportacion(f"No se pudo descargar el audio:\n{detalle}")
 
     ruta_wav = destino_base + ".wav"
     if not os.path.exists(ruta_wav):
