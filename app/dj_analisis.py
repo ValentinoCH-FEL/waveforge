@@ -2,7 +2,7 @@
 dj_analisis.py — lo que el DJ necesita saber de cada canción, sin nada de Tkinter.
 
   - decodificar(): cualquier archivo de audio o video a memoria (ffmpeg), sin temporales.
-  - analisis_rapido(): BPM y tonalidad con solo 60 s de la canción (para llenar la biblioteca
+  - analisis_rapido(): BPM, tonalidad, energía, duración y etiquetas con solo 60 s de la canción (para llenar la biblioteca
     rápido). Se guarda en disco: cada canción se analiza una sola vez.
   - analisis_completo(): la grilla de beats de toda la canción, el compás y dónde empieza y
     termina de verdad (para decidir dónde mezclar).
@@ -20,7 +20,8 @@ import numpy as np
 
 SR = 44100            # todo el DJ trabaja a esto, en estéreo
 SR_ANALISIS = 22050
-EXTENSIONES = (".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".aiff", ".aif", ".wma", ".mp4")
+# Solo audio: con .mp4 la biblioteca se llenaba de videos de celular tomados como canciones.
+EXTENSIONES = (".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".aiff", ".aif", ".wma")
 
 CARPETA_DATOS = os.path.join(os.path.expanduser("~"), ".waveforge")
 _RUTA_CACHE = os.path.join(CARPETA_DATOS, "dj_biblioteca.json")
@@ -69,6 +70,34 @@ def _decodificar_trozo(ruta, desde_s, segundos):
     crudo = _ffmpeg(args + ["-i", ruta, "-vn", "-t", str(segundos), "-f", "f32le", "-ac", "1",
                             "-ar", str(SR_ANALISIS), "-"])
     return np.frombuffer(crudo, dtype=np.float32)
+
+
+def metadatos(ruta):
+    """Duración y etiquetas del archivo (artista, título, género), leídas con ffprobe."""
+    datos = {"dur": 0.0, "artista": None, "titulo": None, "genero": None}
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                            "format=duration:format_tags=artist,title,genre", "-of", "json", ruta],
+                           capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        formato = json.loads(r.stdout.decode("utf-8", "replace") or "{}").get("format", {})
+        datos["dur"] = float(formato.get("duration") or 0.0)
+        etiquetas = {k.lower(): str(v).strip() for k, v in (formato.get("tags") or {}).items()}
+        datos["artista"] = etiquetas.get("artist") or None
+        datos["titulo"] = etiquetas.get("title") or None
+        datos["genero"] = etiquetas.get("genre") or None
+    except (OSError, ValueError):
+        pass
+    return datos
+
+
+def de_nombre(ruta):
+    """(artista, título) sacados del nombre del archivo: "03 - Artista - Título.mp3"."""
+    partes = [x.strip() for x in os.path.splitext(os.path.basename(ruta))[0].split(" - ")]
+    if partes and partes[0].isdigit():
+        partes = partes[1:]
+    if len(partes) >= 2:
+        return partes[0], " - ".join(partes[1:])
+    return None, (partes[0] if partes else os.path.basename(ruta))
 
 
 # ---------- tempo y tonalidad ----------
@@ -194,19 +223,27 @@ def en_cache(ruta):
 def analisis_rapido(ruta):
     """{bpm, tono, camelot} usando 60 s de la canción (desde el segundo 30). Usa la caché."""
     guardado = en_cache(ruta)
-    if guardado:
+    if guardado and "dur" in guardado:
         return guardado
+    meta = metadatos(ruta)
+    if 0 < meta["dur"] < 60:
+        raise ErrorAnalisis("Dura menos de un minuto: es muy corta para mezclarla.")
     mono = _decodificar_trozo(ruta, 30, 60)
     if len(mono) < SR_ANALISIS * 20:  # canción corta: desde el principio
         mono = _decodificar_trozo(ruta, 0, 60)
-    if len(mono) < SR_ANALISIS * 5:
+    if len(mono) < SR_ANALISIS * 20:
         raise ErrorAnalisis("El archivo es muy corto o no tiene audio.")
     bpm, _ = _bpm_y_beats(mono)
     bpm_fino, _fase, _contraste, sobre_media = _grilla_fina(mono, bpm)
     if sobre_media > 4.0:  # la grilla calza: es tempo fijo y el valor fino es más exacto
         bpm = bpm_fino
     tono, camelot = _tonalidad(mono)
-    datos = {"bpm": round(bpm, 1), "tono": tono, "camelot": camelot}
+    # energía: qué tan fuerte y "lleno" suena (volumen medio en dB); sirve para no saltar de una
+    # canción tranquila a una muy intensa
+    energia = 20.0 * np.log10(float(np.sqrt(np.mean(np.square(mono, dtype=np.float64)))) + 1e-9)
+    datos = {"bpm": round(bpm, 1), "tono": tono, "camelot": camelot, "energia": round(float(energia), 1),
+             "dur": round(meta["dur"], 1), "artista_tag": meta["artista"], "titulo_tag": meta["titulo"],
+             "genero_tag": meta["genero"]}
     _leer_cache()[_clave(ruta)] = datos
     return datos
 

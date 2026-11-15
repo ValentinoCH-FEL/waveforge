@@ -15,6 +15,26 @@ import tema
 from widgets import BotonAnimado, MedidorVolumen
 
 MS_CUADRO = 100
+VARIADO = "Variado (el DJ decide)"
+# texto del desplegable -> límite del bloque en dj_sesion (None = sin límite)
+DURACIONES = {"Sin límite": None, "15 minutos": ("min", 15), "30 minutos": ("min", 30), "45 minutos": ("min", 45),
+              "1 hora": ("min", 60), "2 horas": ("min", 120), "3 canciones": ("canciones", 3),
+              "5 canciones": ("canciones", 5), "10 canciones": ("canciones", 10)}
+
+
+def unidad_extraible():
+    """Letra de la primera unidad extraíble conectada (ej. "E:/"), o None. Solo en Windows."""
+    try:
+        import ctypes
+        import string
+
+        mascara = ctypes.windll.kernel32.GetLogicalDrives()
+        for i, letra in enumerate(string.ascii_uppercase):
+            if mascara >> i & 1 and ctypes.windll.kernel32.GetDriveTypeW(f"{letra}:\\") == 2:  # 2 = extraíble
+                return f"{letra}:/"
+    except (AttributeError, OSError):
+        pass
+    return None
 
 
 def _tiempo(segundos):
@@ -56,11 +76,45 @@ class PestanaDJ(ttk.Frame):
         self.etiqueta_biblioteca = ttk.Label(barra, text="Todavía no elegiste ninguna carpeta.",
                                              foreground=tema.TEXTO_SUAVE)
         self.etiqueta_biblioteca.pack(side="left", padx=12)
+        self.boton_usb = BotonAnimado(barra, "🔌  Usar USB", self._usar_usb, alto=32,
+                                      ayuda="Cargar la música del USB conectado")
+        self._unidad_usb = None
+
+        # --- plan de la sesión: qué géneros, cuánto tiempo y en qué orden ---
+        plan = ttk.LabelFrame(izquierda, text="Plan de la sesión")
+        plan.pack(fill="x", padx=10, pady=(0, 8))
+        fila = ttk.Frame(plan)
+        fila.pack(fill="x", padx=8, pady=(8, 4))
+        ttk.Label(fila, text="Género:").pack(side="left")
+        self.var_genero = tk.StringVar(value=VARIADO)
+        self.combo_genero = ttk.Combobox(fila, textvariable=self.var_genero, values=[VARIADO], state="readonly",
+                                         width=20)
+        self.combo_genero.pack(side="left", padx=(6, 12))
+        ttk.Label(fila, text="Durante:").pack(side="left")
+        self.var_duracion = tk.StringVar(value="Sin límite")
+        ttk.Combobox(fila, textvariable=self.var_duracion, values=list(DURACIONES), state="readonly",
+                     width=13).pack(side="left", padx=(6, 12))
+        BotonAnimado(fila, "+ Agregar", self._agregar_bloque, alto=28,
+                     ayuda="Agrega este género al final del plan. Cuando se cumple su tiempo,\n"
+                           "el DJ pasa solo al siguiente.").pack(side="left")
+        BotonAnimado(fila, "Quitar último", self._quitar_bloque, alto=28).pack(side="left", padx=6)
+        BotonAnimado(fila, "Reiniciar", self._reiniciar_plan, alto=28, estilo="suave").pack(side="left")
+        self.etiqueta_plan = ttk.Label(plan, text="", wraplength=640, justify="left", foreground=tema.AZUL)
+        self.etiqueta_plan.pack(anchor="w", padx=8)
+        self.var_artista = tk.BooleanVar(value=False)
+        ttk.Checkbutton(plan, text="Preferir canciones del mismo artista", variable=self.var_artista,
+                        command=lambda: setattr(self.sesion, "preferir_artista", self.var_artista.get())).pack(
+            anchor="w", padx=8, pady=(2, 8))
+        self._plan_inicial = True   # el plan todavía es el de fábrica (solo "Variado")
+        self._mostrar_plan()
+
         marco_tabla = ttk.Frame(izquierda)
         marco_tabla.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        self.tabla = ttk.Treeview(marco_tabla, columns=("titulo", "bpm", "tono"), show="headings", selectmode="browse")
-        for columna, texto, ancho, ancla in (("titulo", "Canción", 360, "w"), ("bpm", "BPM", 70, "e"),
-                                             ("tono", "Tono", 90, "center")):
+        self.tabla = ttk.Treeview(marco_tabla, columns=("titulo", "artista", "genero", "bpm", "tono"),
+                                  show="headings", selectmode="browse")
+        for columna, texto, ancho, ancla in (("titulo", "Canción", 250, "w"), ("artista", "Artista", 150, "w"),
+                                             ("genero", "Género", 110, "w"), ("bpm", "BPM", 50, "e"),
+                                             ("tono", "Tono", 80, "center")):
             self.tabla.heading(columna, text=texto)
             self.tabla.column(columna, width=ancho, anchor=ancla, stretch=columna == "titulo")
         desliz = ttk.Scrollbar(marco_tabla, orient="vertical", command=self.tabla.yview)
@@ -147,18 +201,67 @@ class PestanaDJ(ttk.Frame):
         self._filas = {}
         for i, cancion in enumerate(self.sesion.biblioteca):
             self._filas[i] = self.tabla.insert("", "end", values=self._valores(cancion))
-        self._registrar_log(f"DJ: carpeta {carpeta} ({cantidad} canciones)")
+        generos = self.sesion.generos()
+        self.combo_genero.config(values=[VARIADO] + [f"{g}  ({n})" for g, n in generos.items()])
+        self.var_genero.set(VARIADO)
+        self._reiniciar_plan()
+        self._registrar_log(f"DJ: carpeta {carpeta} ({cantidad} canciones, géneros: {', '.join(generos) or '—'})")
         self._actualizar_biblioteca()
         if cantidad == 0:
             messagebox.showinfo("Modo DJ", "No se encontraron archivos de audio en esa carpeta.")
 
     @staticmethod
     def _valores(cancion):
+        base = (cancion["titulo"], cancion["artista"] or "", cancion["genero"])
         if cancion["error"]:
-            return (cancion["titulo"], "—", "no se pudo leer")
+            return base + ("—", "no sirve")
         if cancion["bpm"] is None:
-            return (cancion["titulo"], "…", "…")
-        return (cancion["titulo"], f"{cancion['bpm']:.0f}", f"{cancion['camelot']} · {cancion['tono']}")
+            return base + ("…", "…")
+        return base + (f"{cancion['bpm']:.0f}", f"{cancion['camelot']} · {cancion['tono']}")
+
+    # ---------- plan de la sesión ----------
+
+    def _mostrar_plan(self):
+        self.etiqueta_plan.config(text=self.sesion.describir_plan())
+
+    def _agregar_bloque(self):
+        genero = self.var_genero.get().split("  (")[0]
+        bloque = {"genero": None if genero == VARIADO else genero, "limite": DURACIONES[self.var_duracion.get()]}
+        if self._plan_inicial:      # el primer género que agregas reemplaza al "Variado" de fábrica
+            self.sesion.plan = [bloque]
+            self._plan_inicial = False
+        else:
+            self.sesion.plan.append(bloque)
+        self._mostrar_plan()
+
+    def _quitar_bloque(self):
+        if len(self.sesion.plan) > 1:
+            self.sesion.plan.pop()
+        else:
+            self._reiniciar_plan()
+        self._mostrar_plan()
+
+    def _reiniciar_plan(self):
+        self.sesion.plan = [{"genero": None, "limite": None}]
+        self._plan_inicial = True
+        self._mostrar_plan()
+
+    # ---------- USB ----------
+
+    def _buscar_usb(self):
+        """Muestra el botón "Usar USB" cuando hay una unidad extraíble conectada."""
+        unidad = unidad_extraible()
+        if unidad != self._unidad_usb:
+            self._unidad_usb = unidad
+            if unidad:
+                self.boton_usb.cambiar_texto(f"🔌  Usar USB ({unidad[:2]})")
+                self.boton_usb.pack(side="left", padx=(8, 0), before=self.etiqueta_biblioteca)
+            else:
+                self.boton_usb.pack_forget()
+
+    def _usar_usb(self):
+        if self._unidad_usb:
+            self.abrir_carpeta(self._unidad_usb)
 
     def _actualizar_biblioteca(self):
         biblioteca = self.sesion.biblioteca
@@ -240,7 +343,10 @@ class PestanaDJ(ttk.Frame):
         if e["sonando"]:
             es_mezcla = e["tipo"] == "mezcla"
             self.etiqueta_titulo.config(text=e["titulo"])
-            self.etiqueta_detalle.config(text=f"🎛  Mezclando: {e['receta']}" if es_mezcla else "")
+            quien = "  ·  ".join(x for x in (e.get("artista"), e.get("genero")) if x)
+            if len(self.sesion.plan) > 1:
+                quien += f"  ·  parte {e['bloque'] + 1} de {len(self.sesion.plan)} del plan"
+            self.etiqueta_detalle.config(text=f"🎛  Mezclando: {e['receta']}" if es_mezcla else quien)
             if es_mezcla:
                 self.progreso.config(value=1000 * e["pos_s"] / max(e["total_s"], 1e-6))
                 self.etiqueta_tiempo.config(text=f"mezcla {_tiempo(e['pos_s'])} / {_tiempo(e['total_s'])}")
@@ -270,4 +376,7 @@ class PestanaDJ(ttk.Frame):
         self.boton_bien.habilitar(bool(e.get("puede_votar")))
         self.boton_mal.habilitar(bool(e.get("puede_votar")))
         self._actualizar_biblioteca()
+        self._cuadros = getattr(self, "_cuadros", 0) + 1
+        if self._cuadros % 30 == 1:  # cada 3 s: ¿se conectó o se sacó un USB?
+            self._buscar_usb()
         self.after(MS_CUADRO, self._tick)

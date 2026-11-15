@@ -60,8 +60,15 @@ separa:
 **3. DJ** — mezcla sola las canciones de una carpeta o un USB:
 - Analiza cada canción una vez (BPM, compases y tonalidad en la rueda
   Camelot) y lo guarda en `~/.waveforge/`.
-- Mientras suena una canción, elige la siguiente (tempo parecido,
-  tonalidad compatible y algo de azar) y arma la mezcla en segundo plano.
+- Detecta el USB conectado y organiza la biblioteca por género (la
+  carpeta de cada canción, o su etiqueta), artista y título.
+- **Plan de la sesión**: una lista de géneros con su duración (por
+  tiempo o por cantidad de canciones); al cumplirse, el DJ pasa solo al
+  siguiente. En «Variado» el DJ decide: se queda de 3 a 5 canciones en
+  un género y cambia al que mejor empalma.
+- Mientras suena una canción, elige la siguiente (tempo que se pueda
+  igualar, tonalidad compatible, energía parecida, opcionalmente el
+  mismo artista, y algo de azar) y arma la mezcla en segundo plano.
 - La transición intercambia pistas en 8 compases: cambio de bajo, quitar
   la batería, voz de una sobre el ritmo de la otra, o corte con eco. La
   canción que entra se alinea beat por beat y después vuelve a su tempo.
@@ -70,8 +77,9 @@ separa:
 - 👍 / 👎 en cada mezcla: las recetas con más votos buenos se eligen más
   seguido, y el registro (`dj_transiciones.jsonl`) queda como datos para
   entrenar después un modelo con tu gusto.
-- Pendiente: leer los datos de Rekordbox de un USB, música en línea,
-  elegir canciones parecidas por cómo suenan y el modelo entrenado.
+- Pendiente: estructura de la canción (intro, coro, final), mezclas por
+  palabras de la letra, aprender de videos de DJs reales, datos de
+  Rekordbox y música en línea.
 
 Guarda un registro (`registro.log`) de lo que se hizo y cuándo.
 

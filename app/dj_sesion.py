@@ -66,6 +66,16 @@ class SesionDJ:
         self.mensaje = ""
         self._ultima_mezcla = None    # registro de la última transición que empezó a sonar
         self.nivel = (0.0, 0.0)
+        # Plan de la sesión: bloques en orden. genero None = variado (el DJ decide);
+        # limite None = sin límite, ("min", 30) o ("canciones", 5). El último bloque no se termina.
+        self.plan = [{"genero": None, "limite": None}]
+        self.preferir_artista = False
+        self._bloque = 0
+        self._bloque_de = {}
+        self._bloque_inicio = 0.0
+        self._bloque_canciones = 0
+        self._racha = 0               # modo variado: canciones seguidas del mismo género...
+        self._racha_objetivo = 4      # ...y cuántas se quiere antes de cambiar
 
     # ---------- biblioteca ----------
 
@@ -75,10 +85,18 @@ class SesionDJ:
         rutas = dj_analisis.listar_canciones(carpeta)
         self.biblioteca = []
         for ruta in rutas:
-            cancion = {"ruta": ruta, "titulo": os.path.splitext(os.path.basename(ruta))[0],
-                       "bpm": None, "tono": None, "camelot": None, "error": None}
+            # El género sale de la carpeta donde está la canción (USB/Salsa/..., USB/Rock/...): es la
+            # clasificación de quien armó el USB. Si está suelta en la raíz, se usa la etiqueta del archivo.
+            relativa = os.path.relpath(os.path.dirname(ruta), carpeta)
+            carpeta_genero = None if relativa == "." else relativa.split(os.sep)[0]
+            artista, titulo = dj_analisis.de_nombre(ruta)
+            cancion = {"ruta": ruta, "titulo": titulo, "artista": artista, "genero": carpeta_genero or "Sin género",
+                       "de_carpeta": carpeta_genero is not None, "bpm": None, "tono": None, "camelot": None,
+                       "energia": None, "dur": None, "error": None}
             try:
-                cancion.update(dj_analisis.en_cache(ruta) or {})
+                guardado = dj_analisis.en_cache(ruta)
+                if guardado and "dur" in guardado:
+                    self._aplicar(cancion, guardado)
             except OSError:
                 pass
             self.biblioteca.append(cancion)
@@ -87,10 +105,28 @@ class SesionDJ:
         self._hilo_biblioteca.start()
         return len(rutas)
 
+    @staticmethod
+    def _aplicar(cancion, datos):
+        """Pasa a la canción lo que dio el análisis (y las etiquetas del archivo, donde falte algo)."""
+        for clave in ("bpm", "tono", "camelot", "energia", "dur"):
+            cancion[clave] = datos.get(clave)
+        cancion["artista"] = datos.get("artista_tag") or cancion["artista"]
+        cancion["titulo"] = datos.get("titulo_tag") or cancion["titulo"]
+        if not cancion["de_carpeta"] and datos.get("genero_tag"):
+            cancion["genero"] = datos["genero_tag"]
+
+    def generos(self):
+        """{género: cantidad de canciones}, para armar el plan de la sesión."""
+        cuenta = {}
+        for c in self.biblioteca:
+            if c["error"] is None:
+                cuenta[c["genero"]] = cuenta.get(c["genero"], 0) + 1
+        return dict(sorted(cuenta.items()))
+
     def _analizar_una(self, cancion):
         if cancion["bpm"] is None and cancion["error"] is None:
             try:
-                cancion.update(dj_analisis.analisis_rapido(cancion["ruta"]))
+                self._aplicar(cancion, dj_analisis.analisis_rapido(cancion["ruta"]))
             except Exception as error:
                 cancion["error"] = str(error)
 
@@ -116,26 +152,96 @@ class SesionDJ:
 
     # ---------- elegir la siguiente ----------
 
+    def _avanzar_bloque(self):
+        self._bloque += 1
+        self._bloque_inicio, self._bloque_canciones = time.time(), 0
+
+    def _genero_del_plan(self):
+        """Género del bloque actual (None = variado). Si el bloque ya cumplió su tiempo o su cantidad
+        de canciones, pasa al siguiente."""
+        while self._bloque < len(self.plan) - 1:
+            limite = self.plan[self._bloque]["limite"]
+            if limite is None:
+                break
+            tipo, cantidad = limite
+            cumplido = ((time.time() - self._bloque_inicio) / 60.0 >= cantidad if tipo == "min"
+                        else self._bloque_canciones >= cantidad)
+            if not cumplido:
+                break
+            self._avanzar_bloque()
+        return self.plan[self._bloque]["genero"]
+
     def _elegir(self, actual, bpm_actual):
+        """La siguiente canción, con criterio de DJ: respeta el plan (género y duración), y dentro
+        de lo permitido prefiere tempo que se pueda igualar, tonalidad compatible, energía
+        parecida y (si se pidió) el mismo artista. Algo de azar hace cada sesión distinta."""
         pendientes = [i for i, c in enumerate(self.biblioteca)
                       if i != actual and i not in self._sonadas and c["error"] is None]
         if not pendientes:
             return None
+        cancion_actual = self.biblioteca[actual] if actual is not None else None
+        genero_actual = cancion_actual["genero"] if cancion_actual else None
+
+        genero = self._genero_del_plan()
+        if genero is not None:
+            del_genero = [i for i in pendientes if self.biblioteca[i]["genero"] == genero]
+            while not del_genero and self._bloque < len(self.plan) - 1:  # se acabó ese género: al siguiente bloque
+                self._avanzar_bloque()
+                genero = self.plan[self._bloque]["genero"]
+                del_genero = [i for i in pendientes if genero is None or self.biblioteca[i]["genero"] == genero]
+            pendientes = del_genero or pendientes
+        if genero is None and genero_actual is not None:
+            # Variado: unas canciones seguidas del mismo género y después cambia a otro, para que
+            # la sesión tenga tramos con sentido y no salte de género en cada canción.
+            mismo = [i for i in pendientes if self.biblioteca[i]["genero"] == genero_actual]
+            otros = [i for i in pendientes if self.biblioteca[i]["genero"] != genero_actual]
+            if self._racha < self._racha_objetivo and mismo:
+                pendientes = mismo
+            elif otros:
+                pendientes = otros
+
+        # analizar candidatas hasta tener de dónde elegir (la biblioteca puede estar a medio analizar)
         con_datos = [i for i in pendientes if self.biblioteca[i]["bpm"] is not None]
-        if len(con_datos) < min(6, len(pendientes)):  # la biblioteca aún se está analizando: adelantar algunas
-            for i in self._rng.permutation([i for i in pendientes if i not in con_datos])[:6]:
-                self._analizar_una(self.biblioteca[int(i)])
-            con_datos = [i for i in pendientes if self.biblioteca[i]["bpm"] is not None]
+        faltan = [i for i in pendientes if self.biblioteca[i]["bpm"] is None]
+        for i in self._rng.permutation(faltan)[:max(0, 14 - len(con_datos))]:
+            self._analizar_una(self.biblioteca[int(i)])
+        con_datos = [i for i in pendientes if self.biblioteca[i]["bpm"] is not None]
         if not con_datos:
             return None
-        camelot = self.biblioteca[actual]["camelot"] or ""
+        if bpm_actual is None:  # primera canción de la sesión
+            return int(self._rng.choice(con_datos))
+
         puntajes = []
         for i in con_datos:
             c = self.biblioteca[i]
-            puntaje = -10.0 * abs(np.log(c["bpm"] / bpm_actual))            # tempo parecido
-            puntaje += 0.6 if dj_analisis.camelot_compatibles(camelot, c["camelot"] or "") else 0.0
-            puntajes.append(puntaje + self._rng.uniform(0.0, 0.5))          # azar: cada sesión es distinta
+            puntaje = -10.0 * abs(np.log(c["bpm"] / bpm_actual))                       # tempo parecido
+            puntaje += 1.0 if dj_motor.compatibles(bpm_actual, c["bpm"]) else 0.0       # se puede sincronizar
+            if dj_analisis.camelot_compatibles(cancion_actual["camelot"] or "", c["camelot"] or ""):
+                puntaje += 0.6                                                          # tonalidad compatible
+            if cancion_actual["energia"] is not None and c["energia"] is not None:
+                puntaje -= 0.06 * abs(c["energia"] - cancion_actual["energia"])         # energía parecida
+            if self.preferir_artista and c["artista"] and c["artista"] == cancion_actual["artista"]:
+                puntaje += 1.0
+            puntajes.append(puntaje + self._rng.uniform(0.0, 0.5))                      # azar
         return con_datos[int(np.argmax(puntajes))]
+
+    def _anotar_eleccion(self, anterior, nueva):
+        """Lleva la cuenta del bloque y de la racha de género tras elegir una canción."""
+        self._bloque_canciones += 1
+        self._bloque_de[nueva] = self._bloque  # a qué parte del plan pertenece esta canción
+        if anterior is not None and self.biblioteca[anterior]["genero"] == self.biblioteca[nueva]["genero"]:
+            self._racha += 1
+        else:
+            self._racha, self._racha_objetivo = 1, int(self._rng.integers(3, 6))
+
+    def describir_plan(self):
+        partes = []
+        for k, bloque in enumerate(self.plan):
+            limite = bloque["limite"]
+            cuanto = ("sin límite" if limite is None else
+                      f"{limite[1]:g} min" if limite[0] == "min" else f"{limite[1]} canciones")
+            partes.append(f"{k + 1}) {bloque['genero'] or 'Variado'} · {cuanto}")
+        return "   →   ".join(partes)
 
     # ---------- reproducción ----------
 
@@ -145,10 +251,16 @@ class SesionDJ:
         self.detener()
         if not self.biblioteca:
             raise RuntimeError("Primero elige una carpeta o USB con música.")
-        if indice is None:
-            indice = int(self._rng.integers(len(self.biblioteca)))
         self._parar = threading.Event()
         self._sonadas = set()
+        self._bloque, self._bloque_inicio, self._bloque_canciones = 0, time.time(), 0
+        self._bloque_de = {}
+        self._racha, self._racha_objetivo = 0, int(self._rng.integers(3, 6))
+        if indice is None:  # sin canción elegida: una del primer género del plan
+            indice = self._elegir(None, None)
+            if indice is None:
+                raise RuntimeError("No hay canciones que se puedan reproducir con ese plan.")
+        self._anotar_eleccion(None, indice)
         self._hilo = threading.Thread(target=self._trabajo, args=(indice, self._parar), daemon=True)
         self._hilo.start()
 
@@ -247,10 +359,13 @@ class SesionDJ:
                 continue
 
             self._sonadas.add(indice_b)
+            self._anotar_eleccion(indice, indice_b)
             a = self.biblioteca[indice]
             registro = {"fecha": time.strftime("%Y-%m-%d %H:%M:%S"), "a": a["titulo"], "b": cancion_b["titulo"],
                         "bpm_a": round(ana_a["bpm"], 2), "bpm_b": round(ana_b["bpm"], 2),
                         "camelot_a": a["camelot"], "camelot_b": cancion_b["camelot"],
+                        "genero_a": a["genero"], "genero_b": cancion_b["genero"],
+                        "energia_a": a["energia"], "energia_b": cancion_b["energia"],
                         "receta": plan["receta"], "sincronizada": plan["sincronizada"]}
             nombre = dj_motor.RECETAS[plan["receta"]]["nombre"]
             tramo_mezcla = {"tipo": "mezcla", "indice": indice_b, "titulo": f"{a['titulo']}  →  {cancion_b['titulo']}",
@@ -325,7 +440,9 @@ class SesionDJ:
                         "puede_votar": self._ultima_mezcla is not None}
             t = self._tramos[0]
             mezcla_lista = len(self._tramos) >= 2 and self._tramos[1]["tipo"] == "mezcla"
+            c = self.biblioteca[t["indice"]] if t["indice"] < len(self.biblioteca) else {}
             return {"sonando": True, "tipo": t["tipo"], "titulo": t["titulo"], "indice": t["indice"],
+                    "genero": c.get("genero"), "artista": c.get("artista"), "bloque": self._bloque_de.get(t["indice"], self._bloque),
                     "pos_s": t["pos"] / SR, "fin_s": t["fin"] / SR, "total_s": len(t["audio"]) / SR,
                     "receta": t.get("receta"), "siguiente": self.siguiente, "mensaje": self.mensaje,
                     "mezcla_lista": mezcla_lista and t["tipo"] == "cancion",
