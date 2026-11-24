@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 
 from audio_io import MUESTREO_NATIVO
 
@@ -154,11 +155,35 @@ def _importar_yt_dlp(callback_progreso):
     )
 
 
+_HOSTS_YOUTUBE = ("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com")
+
+
+def _url_de_un_video(url):
+    """Deja el enlace de YouTube apuntando a UN video, sin la lista.
+
+    Los "Mix" de YouTube (list=RD...) son listas que YouTube no deja leer: si yt-dlp
+    toma la lista en vez del video, falla con "This playlist type is unviewable".
+    El id de un Mix es "RD" + el id del video, así que de ahí se recupera el video
+    aunque el enlace no traiga v=. Los enlaces de otros sitios no se tocan."""
+    partes = urllib.parse.urlsplit(url.strip())
+    if partes.hostname not in _HOSTS_YOUTUBE:
+        return url.strip()
+    parametros = urllib.parse.parse_qs(partes.query)
+    video = (parametros.get("v") or [""])[0]
+    lista = (parametros.get("list") or [""])[0]
+    if not video and lista.startswith("RD") and len(lista) == 13:
+        video = lista[2:]
+    if video:
+        return f"https://www.youtube.com/watch?v={video}"
+    return url.strip()
+
+
 def descargar_audio(url, callback_progreso=None, duracion_maxima_s=None):
     """Descarga el audio de UN SOLO video (ignora parámetros de playlist
     en la URL) y lo deja como WAV, usando la librería yt-dlp. Requiere
     conexión a internet y ffmpeg instalado. Si el video dura más que
     duracion_maxima_s, se rechaza antes de descargar nada."""
+    url = _url_de_un_video(url)
     yt_dlp = _importar_yt_dlp(callback_progreso)
 
     if not _ffmpeg_disponible():
@@ -204,6 +229,13 @@ def descargar_audio(url, callback_progreso=None, duracion_maxima_s=None):
         raise
     except Exception as error:
         detalle = _limpiar_texto_progreso(str(error))
+        texto = detalle.lower()
+        if "unavailable" in texto or "private" in texto or "unviewable" in texto:
+            # El video no se puede ver (borrado, privado o bloqueado): actualizar yt-dlp no lo arregla.
+            raise ErrorImportacion(
+                "YouTube no deja ver ese video: puede estar borrado, ser privado o estar "
+                f"bloqueado en tu país. Prueba con otro enlace.\n\n{detalle}"
+            )
         # Lo más común cuando YouTube cambia algo: yt-dlp quedó viejo. Se actualiza para la próxima.
         if _pip_instalar_yt_dlp():
             detalle += "\n\nSe actualizó yt-dlp: cierra y vuelve a abrir la app, y prueba de nuevo."
