@@ -1,0 +1,120 @@
+Diapositiva 1 · Carátula
+
+Buenos días, profesor. Mi nombre es Felipe Valentino Calderón Hurtado y hoy les presento Waveforge, el proyecto que desarrollé para este curso. Waveforge es un estudio de audio de escritorio: le das cualquier canción y la convierte, la separa en pistas usando inteligencia artificial y te deja editarla. Lo hice yo solo, así que en esta exposición les voy a mostrar el código por dentro: qué hace cada parte y cómo se conectan entre sí.
+
+Diapositiva 2 · Introducción
+
+La idea se resume en tres verbos. Primero, convierte: no importa si le doy un MP3, un video o un enlace de YouTube, siempre lo lleva al mismo formato. Segundo, separa: una inteligencia artificial divide la canción en hasta siete pistas, como la voz, la batería o el bajo. Y tercero, moldea: en un editor puedo subir o bajar el volumen o aplicar efectos solo a un tramo, y después exportar el resultado. Para construirlo usé Python con Tkinter para la interfaz, C++ para los efectos de audio y modelos de IA que corren tanto en el procesador como en la tarjeta gráfica.
+
+Además, el programa tiene dos funciones pensadas para grabaciones en vivo: un modo concierto que separa al público de la voz, y un identificador que reconoce la voz del cantante.
+
+Diapositiva 3 · Arquitectura
+
+Antes de entrar al código, les muestro cómo está organizado. Son tres capas. Arriba está la interfaz: es lo que el usuario ve y clickea. En el medio está la lógica, que es Python puro y no sabe nada de ventanas; ahí viven la conversión, la separación y las ediciones. Y abajo está el motor en C++, que hace los cálculos pesados de los efectos. La regla que seguí es sencilla: la interfaz puede llamar a la lógica, pero la lógica nunca toca la interfaz. Gracias a eso pude probar cada pieza por separado, sin tener que abrir la ventana.
+
+Diapositiva 4 · Estructura · app/
+
+Ahora, archivo por archivo. Todo el código en Python está en la carpeta app, y la idea es que cada archivo haga una sola cosa.
+
+main.py es el punto de entrada: crea la ventana y las pestañas, y maneja la carga y la separación de la canción. editor.py es la pestaña Moldear, donde se edita, y ediciones.py es el que realmente aplica esos cambios al audio. separador.py contiene la inteligencia artificial que divide la canción en pistas, e identificador.py reconoce la voz del cantante. importador.py y audio_io.py se encargan de traer el audio y de leer y guardar los archivos WAV.
+
+A la derecha están los de apoyo. reproductor.py hace sonar las pistas por los parlantes. procesamiento.py aplica los filtros y mezcla las pistas al exportar. motor.py es el puente con C++, y filtros_registry.py es el catálogo de efectos. widgets.py y tema.py se ocupan de cómo se ve todo. Y la carpeta pycache la genera Python solo, para que el programa arranque más rápido.
+
+Diapositiva 5 · Estructura · native/ y raíz
+
+En la carpeta native está el motor en C++. Dentro de filtros hay un archivo por cada efecto: pasa-bajos, pasa-altos, normalizar, quitar ruido y el ecualizador. filtro.h es el contrato que todos respetan, y el script build_windows.bat los compila en un solo archivo, filtro.dll, que es el que carga Python. Los otros dos scripts hacen lo mismo para Linux y Mac.
+
+En la raíz del proyecto, .venv es un Python aislado con todas las librerías del proyecto, para no mezclarlas con las de la computadora. iniciar.bat es lo que uno ejecuta: con doble clic instala lo que falte y abre la aplicación. requirements.txt es la lista de librerías, el README es la documentación, y registro.log guarda lo que va pasando mientras se usa el programa.
+
+Por último, .gitignore indica qué no se sube a GitHub, como .venv o filtro.dll, porque cada computadora los genera por su cuenta. Y .gitattributes se asegura de que los scripts se guarden con el formato correcto para Windows y para Linux.
+
+Diapositiva 6 · Flujo general
+
+Este es el recorrido completo de una canción, de principio a fin. Todo empieza en main.py cuando elijo el archivo. Luego importador.py lo convierte a WAV. Después separador.py le pasa la canción a la inteligencia artificial, que la divide en pistas. Esas pistas se abren solas en el editor, donde ediciones.py aplica los cambios que hago. Y al final reproductor.py me deja escucharlo y audio_io.py lo guarda en disco. Un detalle importante: todo lo que es lento, como convertir o separar, corre en segundo plano, así la ventana nunca se queda congelada. Ahora vamos paso por paso.
+
+Diapositiva 7 · 1 · Convierte
+
+El primer paso es convertir. Arriba ven la función convertir_a_wav. Lo que hace es armar un comando de ffmpeg, que es la herramienta que realmente convierte el audio. Fíjense en las líneas resaltadas: “-ar” con MUESTREO_NATIVO indica 44 100 muestras por segundo; “-ac”, “2” significa dos canales, o sea estéreo; y “s16” son 16 bits por muestra. Con subprocess.run ejecuto ese comando.
+
+Abajo está cargar_wav, que lee el archivo ya convertido. El audio viene como números enteros, y al dividirlos entre 32768.0 los convierto en decimales entre menos uno y uno, que es el formato con el que trabajan los filtros. Por último, como las muestras vienen intercaladas, izquierda, derecha, izquierda, derecha, con [0::2] tomo las de la izquierda y con [1::2] las de la derecha. ¿Por qué un solo formato? Porque así el resto del programa no tiene que preocuparse de qué tipo de archivo entró.
+
+Diapositiva 8 · 2 · Separa
+
+Este es el corazón del proyecto: separar la canción. Arriba ven _separar_demucs. En la línea resaltada, _obtener_demucs() carga el modelo Demucs, y le paso el audio. El modelo me devuelve las pistas: voz, batería, bajo, guitarra, piano y otros.
+
+Abajo está etapa_voces, que corre en un segundo hilo. Con cola.get() recibe un trozo que Demucs ya separó. Luego, con _obtener_karaoke, un segundo modelo toma la voz y saca solo la voz principal. Y miren la última línea: los coros los calculo como voz - principal. Es decir, lo que sobra de la voz son los coros. Así las pistas siempre suman exactamente la canción original.
+
+A la derecha está la idea clave: los dos modelos trabajan a la vez. Mientras el procesador separa un trozo con Demucs, la tarjeta gráfica ya está sacando la voz del trozo anterior.
+
+Diapositiva 9 · 2 · Separa · rendimiento
+
+Aquí tuve un problema real: mi computadora no tiene tarjeta NVIDIA, que es lo que normalmente se usa para inteligencia artificial. La solución fue esta función, _proveedores_onnx. Primero pregunta qué hay disponible en la máquina. Luego busca en orden: “CUDAExecutionProvider”, que es NVIDIA; si no hay, “DmlExecutionProvider”, que es DirectML y funciona con cualquier tarjeta en Windows, incluso la integrada; y como último recurso, “CPUExecutionProvider”, que es el procesador. Con este cambio, el modelo de voz pasó de tardar casi 26 segundos a menos de 8 por cada 30 segundos de canción. Y la interfaz, que antes se trababa hasta 15 milisegundos, ahora apenas se atrasa 2.
+
+Hasta aquí vimos la calidad rápida. Ahora les muestro las otras piezas de la separación: la calidad alta con RoFormer, el modo concierto y el identificador de voz.
+
+Diapositiva 10 · 2 · Separa · calidad alta
+
+La aplicación tiene dos calidades de separación, y esta diapositiva muestra la calidad alta. Arriba está el modelo que se usa: Mel-Band RoFormer, que pesa unos 900 megas y se descarga solo la primera vez.
+
+Abajo está la función _separar_trozo. En la primera línea resaltada, si la calidad no es alta, se usa Demucs como siempre y listo. Pero si es alta, con _obtener_voz_alta cargo RoFormer y le pido solo la voz, porque es el modelo que mejor la separa. Fíjense en audio - voz: a Demucs ya no le paso la canción completa, sino la canción sin voz, y él solo reparte los instrumentos. Al final, con partes["voz"] = voz, la voz que queda es la de RoFormer.
+
+El resultado es una voz más limpia, con menos restos de batería o guitarra. El costo es el tiempo: sin tarjeta NVIDIA, tarda varias veces lo que dura la canción. Por eso la dejé como opción y no como la calidad por defecto.
+
+Diapositiva 11 · 2 · Separa · modo concierto
+
+Esta función nació de un problema real: en los videos de conciertos, la pista de voz traía también al público cantando, gritando o aplaudiendo. Para resolverlo agregué el modo concierto.
+
+Arriba, en main.py, var_publico es la casilla «Modo concierto» que el usuario marca en la ventana. Abajo, en etapa_voces, la condición if publico and hay_voz hace que solo se use cuando la casilla está marcada y el trozo realmente tiene voz, así no se pierde tiempo en partes instrumentales. Con _obtener_publico cargo un tercer modelo, UVR-MDX-NET Crowd HQ 1, que está entrenado justamente para separar al público.
+
+Lo que ese modelo quita, o sea voz - sin_publico, no se tira: queda en su propia pista llamada Público. Y con voz = sin_publico, la voz ya limpia es la que pasa al karaoke, que después la divide en voz principal y coros. Como corre en ONNX, este modelo también aprovecha la tarjeta gráfica.
+
+Diapositiva 12 · Identificador de voz · huella
+
+El modo concierto quita al público, pero a veces quedan otras voces: gente cantando muy fuerte o un corista. Para eso hice el identificador de voz, que reconoce al cantante por su voz, parecido a como un celular reconoce a su dueño.
+
+En la primera línea resaltada, ref es un tramo que marca el usuario, donde se escucha solo al artista. Con huellas([fbank(ref)]), el modelo WeSpeaker convierte esa voz en una huella: una lista de 256 números que la describe.
+
+Después, en el for, recorro toda la pista en ventanas de un segundo y medio, avanzando de a un cuarto de segundo. Las ventanas en silencio se saltan con _NIVEL_MINIMO_DB, porque ahí no hay nada que comparar. A cada ventana le saco su propia huella, y con embs @ huella_ref calculo el parecido coseno: si da cerca de 1 es la misma voz, y si da cerca de 0 es otra persona.
+
+Diapositiva 13 · Identificador de voz · exigencia
+
+Ya tengo un parecido para cada ventana; ahora hay que convertirlo en volumen. Eso hace la función curva. El usuario mueve un control llamado exigencia, de 0 a 1. Con esa exigencia calculo dos límites: alto y bajo. Si una ventana se parece más que alto, es el cantante y se queda con su volumen completo. Si se parece menos que bajo, es otra voz y se quita. Y entre los dos, con np.clip, el volumen baja de a poco, para que no suene cortado. Después, con np.convolve, suavizo la curva, así el volumen no salta de una ventana a la otra.
+
+Abajo, en editor.py, se ve que el resultado se guarda como una operación más, de tipo "curva". Eso significa que el identificador tampoco toca el audio original: si no me gusta cómo quedó, cambio la exigencia o deshago, y la comparación no se tiene que repetir.
+
+Diapositiva 14 · Interfaz
+
+Esta diapositiva explica por qué el programa no se traba. Si hago algo lento en el hilo principal, la ventana deja de responder. Por eso, en la parte de arriba, uso threading.Thread con .start(): la separación arranca en otro hilo y la ventana sigue funcionando normal.
+
+Dentro de _separar_en_hilo hay dos detalles importantes. El primero es sesion != self._sesion: si el usuario carga otra canción mientras la anterior todavía se está separando, este trabajo se cancela, porque ya no sirve. El segundo es el except: si algo falla, no se cierra el programa, sino que se le avisa al usuario. Y para devolver el resultado uso root.after(0, ...), porque Tkinter no permite tocar la ventana desde otro hilo; esta es la forma segura de pasarle el resultado.
+
+Diapositiva 15 · 3 · Moldea
+
+Ahora el editor, y aquí está la decisión de diseño más importante: el editor nunca modifica el audio original. Cada cambio que hago se guarda como una operación. Fíjense en op[“i0”] y op[“i1”]: indican dónde empieza y dónde termina el tramo que quiero editar.
+
+Si la operación es de volumen, con 10.0 ** (db / 20.0) convierto los decibeles a un número para multiplicar; por ejemplo, bajar 6 decibeles es multiplicar por 0,5. Y _rampa_bordes suaviza los extremos del tramo para que no se escuche un clic.
+
+Abajo, renderizar hace una copia del original con copy=True y luego, en el for op in operaciones, aplica cada cambio en orden. ¿Y cómo funciona deshacer? Muy simple: quito la última operación de la lista y vuelvo a renderizar. Como el original nunca se tocó, el resultado es exactamente igual a como estaba antes.
+
+Diapositiva 16 · Motor nativo
+
+Los efectos de audio, como el ecualizador, los escribí en C++, porque tienen que recorrer millones de muestras y ahí C++ es mucho más rápido que Python. Arriba a la izquierda está el contrato: todos los filtros reciben lo mismo, float* entrada, float* salida, la cantidad de muestras y un parámetro. Abajo está el ecualizador por dentro: la línea resaltada es la fórmula que se aplica a cada muestra, una por una.
+
+A la derecha está cómo se conecta con Python. Con ctypes.CDLL cargo la librería filtro.dll. Y con self._funcion(nombre) llamo al filtro por su nombre, pasándole directamente la memoria del arreglo, sin copiar el audio. Como todos los filtros tienen la misma firma, agregar un efecto nuevo es tan fácil como escribir el archivo en C++ y anotarlo en el catálogo.
+
+Diapositiva 17 · Dispositivo de salida
+
+Para escuchar el resultado, el programa se comunica con la tarjeta de sonido usando la librería sounddevice. Con sd.OutputStream abro la salida de audio de la computadora. En callback=self._callback le digo qué función llamar cada vez que necesita más sonido, y con blocksize=1024 le indico que trabaje de a 1 024 muestras.
+
+Dentro del callback, por cada pista, multiplico el sonido por su volumen y lo sumo a la salida. En la línea del peso está la rampa: si muevo un volumen, el cambio no es de golpe sino gradual, así no se escucha un salto. Y al final, np.clip limita la mezcla para que nunca sature.
+
+Diapositiva 18 · Resultados
+
+Estos son resultados que medí en mi propia computadora, un Ryzen 5 sin tarjeta NVIDIA. Al bajar 6 decibeles en un tramo, el resultado es exactamente menos 6, y fuera del tramo el audio queda intacto. Redibujar cinco minutos de ondas tarda solo 7 milisegundos. La separación tarda menos de lo que dura la canción. Y al deshacer, el audio vuelve a ser idéntico al original.
+
+Quiero ser transparente con dos límites: estas pruebas las hice con audio generado, no medí la calidad con canciones reales, y el proyecto todavía no tiene pruebas automáticas en el repositorio. Esos son los siguientes pasos.
+
+Diapositiva 19 · Conclusiones
+
+Para cerrar, me quedo con cuatro aprendizajes. Uno: convertir todo a un solo formato desde el inicio simplificó muchísimo el resto del código. Dos: separar la lógica de la interfaz me permitió probar cada parte por su cuenta. Tres: aprendí a aprovechar el hardware que tenía, usando la tarjeta gráfica integrada en lugar de depender de una NVIDIA. Y cuatro: editar sin destruir el original hace que deshacer sea exacto y confiable. Y algo que aprendí en el camino: es mejor combinar varios modelos especializados, uno para los instrumentos, otro para la voz, otro para el público y otro para reconocer al cantante, que pedirle todo a uno solo. Lo que sigue es agregar pruebas automáticas, medir la calidad con canciones reales y terminar el modo DJ, que ya está en desarrollo. Muchas gracias, profesor, quedo atento a sus preguntas.
+
