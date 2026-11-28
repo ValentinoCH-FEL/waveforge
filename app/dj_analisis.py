@@ -174,6 +174,66 @@ def _grilla_fina(mono, bpm_aprox):
     return bpm, fase, contraste, puntaje / (float(curva.mean()) + 1e-12)
 
 
+def _calce(curva, beats_s):
+    """Qué tanto caen unos beats sobre los golpes: golpes en los beats / golpes a medio camino."""
+    fps = SR_ANALISIS / _HOP_GOLPES
+    x = np.arange(len(curva))
+    en = np.interp(beats_s * fps, x, curva).mean()
+    medio = np.interp((beats_s[:-1] + np.diff(beats_s) / 2) * fps, x, curva).mean()
+    return float(en / (medio + 1e-12))
+
+
+def grilla_local(audio, desde_s, hasta_s, bpm_aprox):
+    """Vuelve a medir el ritmo SOLO en un tramo (donde se va a mezclar). En 60 s el tempo es casi
+    fijo aunque la canción entera lo mueva (salsa y música en vivo), así que la medición es
+    mucho más precisa que la de toda la canción. Prueba dos métodos y se queda con el que calza:
+      - grilla fija: BPM a 0,02 y fase a 1 ms (para tempo estable);
+      - seguimiento de beats a 6 ms (sigue al músico si acelera o frena un poco).
+    Devuelve {bpm, beats (segundos absolutos), fase, calce}."""
+    import librosa
+    from scipy.signal import resample_poly
+
+    a = max(0, int(desde_s * SR))
+    b = min(len(audio), int(hasta_s * SR))
+    mono = resample_poly(audio[a:b].mean(axis=1), 1, SR // SR_ANALISIS).astype(np.float32)
+    dur = len(mono) / SR_ANALISIS
+    if dur < 10:
+        raise ErrorAnalisis("Tramo muy corto para medir el ritmo.")
+    curva = _curva_golpes(mono)
+
+    bpm_fijo, fase_s, _c, _s = _grilla_fina(mono, bpm_aprox)
+    fijos = np.arange(fase_s, dur, 60.0 / bpm_fijo)
+    hop = 128
+    onset = librosa.onset.onset_strength(y=mono, sr=SR_ANALISIS, hop_length=hop)
+    _t, cuadros = librosa.beat.beat_track(onset_envelope=onset, sr=SR_ANALISIS, hop_length=hop,
+                                          start_bpm=bpm_fijo, tightness=300)
+    seguidos = librosa.frames_to_time(cuadros, sr=SR_ANALISIS, hop_length=hop)
+    # el seguimiento sirve solo si mantiene el mismo pulso (no saltó a doble o mitad)
+    usar_seguidos = (len(seguidos) > 16 and
+                     abs(np.median(np.diff(seguidos)) * bpm_fijo / 60.0 - 1.0) < 0.04 and
+                     _calce(curva, seguidos) > _calce(curva, fijos) * 1.05)
+    beats = seguidos if usar_seguidos else fijos
+    bpm = 60.0 / float(np.median(np.diff(beats)))
+
+    from scipy.signal import butter, sosfilt
+    graves = sosfilt(butter(2, 150, btype="low", fs=SR_ANALISIS, output="sos"), mono)
+    medio = int(0.05 * SR_ANALISIS)
+    energia = np.array([float(np.sum(np.square(graves[max(0, int(t * SR_ANALISIS) - medio // 4):
+                                                         int(t * SR_ANALISIS) + medio]))) for t in beats])
+    fase = int(np.argmax([energia[p::4].mean() for p in range(4)]))
+    intervalos = np.diff(beats)
+    periodo = float(np.median(intervalos))
+    calce = _calce(curva, beats)
+    inicio, final = beats[beats < 20.0], beats[beats > dur - 20.0]
+    return {"bpm": bpm, "beats": beats + a / SR, "fase": fase, "calce": calce,
+            # el error típico de la salsa: congas y bajo golpean fuerte "entre" los beats
+            "contratiempo": _calce(curva, beats + periodo / 2) / (calce + 1e-9),
+            "calce_inicio": _calce(curva, inicio) if len(inicio) > 4 else calce,
+            "calce_final": _calce(curva, final) if len(final) > 4 else calce,
+            "seguidos": bool(usar_seguidos), "regularidad": float(np.std(intervalos) / np.mean(intervalos)),
+            "fuerza_uno": float(max(energia[p::4].mean() for p in range(4)) / (energia.mean() + 1e-12))}
+
+
 def camelot_compatibles(a, b):
     """True si dos tonalidades Camelot combinan: la misma, la vecina (±1) o su relativa (A/B)."""
     try:
@@ -188,6 +248,7 @@ def camelot_compatibles(a, b):
 # ---------- análisis rápido, guardado en disco ----------
 
 _cache = None
+VERSION_ANALISIS = 2  # subirla cuando cambie el análisis: lo guardado antes se vuelve a medir
 
 
 def _leer_cache():
@@ -223,7 +284,7 @@ def en_cache(ruta):
 def analisis_rapido(ruta):
     """{bpm, tono, camelot} usando 60 s de la canción (desde el segundo 30). Usa la caché."""
     guardado = en_cache(ruta)
-    if guardado and "dur" in guardado:
+    if guardado and guardado.get("v") == VERSION_ANALISIS:
         return guardado
     meta = metadatos(ruta)
     if 0 < meta["dur"] < 60:
@@ -234,16 +295,16 @@ def analisis_rapido(ruta):
     if len(mono) < SR_ANALISIS * 20:
         raise ErrorAnalisis("El archivo es muy corto o no tiene audio.")
     bpm, _ = _bpm_y_beats(mono)
-    bpm_fino, _fase, _contraste, sobre_media = _grilla_fina(mono, bpm)
-    if sobre_media > 4.0:  # la grilla calza: es tempo fijo y el valor fino es más exacto
-        bpm = bpm_fino
+    # librosa da el tempo en escalones (95.7, 103.4, 112.3...); la grilla fina busca el valor
+    # exacto cerca de ese (±6 %), que en 60 s es estable aunque la canción se grabe en vivo
+    bpm = _grilla_fina(mono, bpm)[0]
     tono, camelot = _tonalidad(mono)
     # energía: qué tan fuerte y "lleno" suena (volumen medio en dB); sirve para no saltar de una
     # canción tranquila a una muy intensa
     energia = 20.0 * np.log10(float(np.sqrt(np.mean(np.square(mono, dtype=np.float64)))) + 1e-9)
     datos = {"bpm": round(bpm, 1), "tono": tono, "camelot": camelot, "energia": round(float(energia), 1),
              "dur": round(meta["dur"], 1), "artista_tag": meta["artista"], "titulo_tag": meta["titulo"],
-             "genero_tag": meta["genero"]}
+             "genero_tag": meta["genero"], "v": VERSION_ANALISIS}
     _leer_cache()[_clave(ruta)] = datos
     return datos
 

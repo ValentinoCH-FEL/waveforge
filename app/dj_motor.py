@@ -19,10 +19,11 @@ import separador
 from dj_analisis import SR
 
 BEATS = 32                    # largo de la transición: 8 compases
-MAX_DIFERENCIA_TEMPO = 0.10   # hasta ±10 % se igualan los tempos; más que eso, corte con eco
+MAX_DIFERENCIA_TEMPO = 0.08   # hasta ±8 % se igualan los tempos (≈1 semitono); más que eso, corte con eco
 SEGUNDOS_VUELTA = 8.0         # lo que tarda B en volver a su velocidad original
 _MARGEN = SR                  # audio extra a cada lado del tramo que se separa (contexto para la IA)
-_E = 0.004                    # ancho de un corte "seco" (fracción de la transición, ~60 ms)
+_E = 1.0 / BEATS              # un "corte" dura un beat entero: cambia en el beat, pero sin chasquido
+FRASE = 16                    # las mezclas empiezan al inicio de una frase (4 compases), como un DJ
 
 STEMS = ("voz", "bateria", "bajo", "otros")
 
@@ -37,6 +38,13 @@ def _sube(f0, f1): return [(0, 0), (f0, 0), (f1, 1), (1, 1)]
 # Reglas comunes: A empieza completa y termina en silencio; B empieza en silencio y termina
 # completa; las dos voces nunca suenan juntas; los cortes secos caen en inicio de compás.
 RECETAS = {
+    # La de los DJs de club: las dos suenan juntas 8 compases; los bajos se cambian en el "uno"
+    # de la mitad (nunca suenan dos bajos a la vez) y las voces no se pisan.
+    "mezcla_larga": {
+        "nombre": "Mezcla larga",
+        "A": {"bateria": _baja(.5, 1), "bajo": _corte(.5), "voz": _baja(.25, .5), "otros": _baja(.375, 1)},
+        "B": {"bateria": _sube(0, .5), "bajo": _entra(.5), "voz": _sube(.625, .875), "otros": _sube(0, .625)},
+    },
     "cambio_de_bajo": {
         "nombre": "Cambio de bajo",
         "A": {"bateria": _corte(.5), "bajo": _corte(.5), "voz": _baja(.25, .5), "otros": _baja(.5, 1)},
@@ -66,15 +74,61 @@ RECETAS = {
         "B": {s: _entra(.5) for s in STEMS},
     },
 }
-SINCRONIZADAS = ("cambio_de_bajo", "sin_bateria", "voz_sobre_ritmo", "eco")
+SINCRONIZADAS = ("mezcla_larga", "cambio_de_bajo", "sin_bateria", "voz_sobre_ritmo", "eco")
+# Cuánto se usa cada una antes de tener votos: las suaves, más; el corte con eco es para variar.
+PREFERENCIA = {"mezcla_larga": 3.0, "cambio_de_bajo": 2.0, "sin_bateria": 1.5, "voz_sobre_ritmo": 1.0, "eco": 0.3}
 
 
 class ErrorMezcla(Exception):
     pass
 
 
+def relacion_tempo(bpm_a, bpm_b):
+    """Cómo calzar los beats de A y B. El análisis a veces cuenta el doble o la mitad de beats
+    (una salsa a 95 y otra a 190 BPM llevan el mismo pulso), así que se prueba 1:1, 1:2 y 2:1.
+    Devuelve (paso_a, paso_b, diferencia): usar un beat de cada paso_a en A y de cada paso_b en B."""
+    opciones = [(1, 1, bpm_b / bpm_a), (1, 2, bpm_b / (2 * bpm_a)), (2, 1, 2 * bpm_b / bpm_a)]
+    paso_a, paso_b, r = min(opciones, key=lambda o: abs(np.log(o[2])))
+    return paso_a, paso_b, abs(r - 1.0)
+
+
 def compatibles(bpm_a, bpm_b):
-    return abs(bpm_b / bpm_a - 1.0) <= MAX_DIFERENCIA_TEMPO
+    return relacion_tempo(bpm_a, bpm_b)[2] <= MAX_DIFERENCIA_TEMPO
+
+
+def afinar(audio_a, ana_a, audio_b, ana_b, salir_s=None):
+    """Mide de nuevo el ritmo solo donde se mezcla: el final de A y el inicio de B (60 s cada
+    uno). Devuelve copias de los análisis con esos beats, más precisos que los de toda la
+    canción. Si la medición falla, se usan los originales."""
+    import dj_analisis
+
+    fin_a = ana_a["fin_s"] if salir_s is None else min(salir_s, ana_a["fin_s"])
+    local_a, local_b = dict(ana_a), dict(ana_b)
+    try:
+        g = dj_analisis.grilla_local(audio_a, fin_a - 60.0, fin_a + 0.5, ana_a["bpm"])
+        local_a.update(bpm=g["bpm"], beats=g["beats"], fase=g["fase"], calce=g["calce"])
+    except Exception:  # noqa: BLE001
+        pass
+    desde_b, hasta_b = ana_b["inicio_s"], ana_b["inicio_s"] + 60.0
+    try:
+        propia = dj_analisis.grilla_local(audio_b, desde_b, hasta_b, ana_b["bpm"])
+        mejor = propia
+        # En salsa y música en vivo el detector a veces cuenta 3 golpes donde hay 2 (o 4 por 3).
+        # Como un DJ que prueba si B "entra" al tempo de A: si la grilla al tempo de A (o su
+        # doble o mitad) calza casi igual de bien con los golpes de B, se usa esa.
+        if not compatibles(local_a["bpm"], propia["bpm"]):
+            for factor in (1.0, 2.0, 0.5):
+                objetivo = local_a["bpm"] * factor
+                if not 60.0 <= objetivo <= 200.0:
+                    continue
+                g = dj_analisis.grilla_local(audio_b, desde_b, hasta_b, objetivo)
+                if compatibles(local_a["bpm"], g["bpm"]) and g["calce"] >= 0.85 * propia["calce"] and \
+                        (mejor is propia or g["calce"] > mejor["calce"]):
+                    mejor = g
+        local_b.update(bpm=mejor["bpm"], beats=mejor["beats"], fase=mejor["fase"], calce=mejor["calce"])
+    except Exception:  # noqa: BLE001
+        pass
+    return local_a, local_b
 
 
 def planear(ana_a, ana_b, rng, pesos=None, beats=BEATS, salir_s=None):
@@ -82,25 +136,34 @@ def planear(ana_a, ana_b, rng, pesos=None, beats=BEATS, salir_s=None):
     beats: largo de la transición. salir_s: segundo de A donde debe terminar la mezcla (estilo
     aprendido de un DJ que cambia rápido); por defecto, cerca del final de la canción."""
     beats_a, beats_b = ana_a["beats"], ana_b["beats"]
-    # A: la mezcla termina ~1 s antes de que se acabe la música, y empieza en un "uno" de compás
+    paso_a, paso_b, diferencia = relacion_tempo(ana_a["bpm"], ana_b["bpm"])
+    sincronizada = diferencia <= MAX_DIFERENCIA_TEMPO
+    if not sincronizada:
+        paso_a = paso_b = 1
+    # A: la mezcla termina ~1 s antes de que se acabe la música, y empieza al inicio de una
+    # frase (cada 16 beats desde un "uno"); si no cabe, al menos en un "uno" de compás
     limite = ana_a["fin_s"] - 1.0 if salir_s is None else min(salir_s, ana_a["fin_s"] - 1.0)
     i_fin = int(np.searchsorted(beats_a, limite)) - 1
-    i0 = i_fin - beats
-    i0 -= (i0 - ana_a["fase"]) % 4
+    i0 = i_fin - beats * paso_a
+    for bloque in (FRASE * paso_a, 4):
+        candidato = i0 - (i0 - ana_a["fase"]) % bloque
+        if candidato >= 8:
+            i0 = candidato
+            break
     # B: entra en su primer "uno" con música
     j0 = int(np.searchsorted(beats_b, ana_b["inicio_s"]))
     j0 += (ana_b["fase"] - j0) % 4
-    if i0 < 8 or j0 + beats + 4 >= len(beats_b):
+    if i0 < 8 or i0 + beats * paso_a >= len(beats_a) or j0 + beats * paso_b + 4 >= len(beats_b):
         raise ErrorMezcla("Alguna de las dos canciones es muy corta para mezclarla.")
 
-    sincronizada = compatibles(ana_a["bpm"], ana_b["bpm"])
     if sincronizada:
-        p = np.array([(pesos or {}).get(r, 0.5) for r in SINCRONIZADAS], dtype=float)  # 0.5 = sin votos aún
+        p = np.array([(pesos or {}).get(r, 0.5) * PREFERENCIA[r] for r in SINCRONIZADAS], dtype=float)  # 0.5 = sin votos aún
         receta = str(rng.choice(SINCRONIZADAS, p=p / p.sum()))
     else:
         receta = "eco_libre"
     return {"i0": i0, "j0": j0, "receta": receta, "sincronizada": sincronizada, "beats": beats,
-            "a0": int(round(beats_a[i0] * SR)), "a1": int(round(beats_a[i0 + beats] * SR))}
+            "paso_a": paso_a, "paso_b": paso_b,
+            "a0": int(round(beats_a[i0] * SR)), "a1": int(round(beats_a[i0 + beats * paso_a] * SR))}
 
 
 def separar_tramo(audio):
@@ -122,8 +185,10 @@ def _muestrear(pista, posiciones):
 
 
 def _envolvente(puntos, fraccion):
+    """Volumen a lo largo de la transición. La curva seno hace los fundidos de "potencia
+    constante": cuando A baja y B sube a la vez, el volumen total no se hunde en el medio."""
     f, g = zip(*puntos)
-    return np.interp(fraccion, f, g).astype(np.float32)[:, None]
+    return np.sin(0.5 * np.pi * np.interp(fraccion, f, g)).astype(np.float32)[:, None]
 
 
 def _limitar(x):
@@ -139,8 +204,9 @@ def preparar(audio_a, ana_a, audio_b, ana_b, plan, cancelado=None):
     BEATS = plan.get("beats", 32)  # largo de esta transición (tapa el valor por defecto del módulo)
     n = a1 - a0
     receta = RECETAS[plan["receta"]]
-    beats_a = ana_a["beats"][plan["i0"]:plan["i0"] + BEATS + 1] * SR - a0      # beats de A, relativos
-    beats_b = ana_b["beats"][plan["j0"]:plan["j0"] + BEATS + 1] * SR           # beats de B, absolutos
+    pa, pb = plan.get("paso_a", 1), plan.get("paso_b", 1)  # 2 = ese análisis contó el doble de beats
+    beats_a = ana_a["beats"][plan["i0"]:plan["i0"] + BEATS * pa + 1:pa] * SR - a0   # beats de A, relativos
+    beats_b = ana_b["beats"][plan["j0"]:plan["j0"] + BEATS * pb + 1:pb] * SR        # beats de B, absolutos
     salida = np.arange(n, dtype=np.float64)
     fraccion = np.interp(salida, beats_a, np.linspace(0.0, 1.0, BEATS + 1))    # 0..1, medido en beats
 
