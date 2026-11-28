@@ -166,9 +166,26 @@ def planear(ana_a, ana_b, rng, pesos=None, beats=BEATS, salir_s=None):
             "a0": int(round(beats_a[i0] * SR)), "a1": int(round(beats_a[i0 + beats * paso_a] * SR))}
 
 
-def separar_tramo(audio):
+def separar_ligero(audio):
+    """Para equipos modestos: sin IA. El bajo se separa con un filtro de graves (lo que hace un DJ
+    con la perilla de bajos de la consola) y todo lo demás queda en "otros". Es instantáneo y las
+    pistas siguen sumando exactamente el audio original."""
+    from scipy.signal import butter, sosfiltfilt
+
+    graves = sosfiltfilt(butter(4, 150, btype="low", fs=SR, output="sos"), audio, axis=0).astype(np.float32)
+    cero = np.zeros_like(audio)
+    return {"voz": cero, "bateria": cero, "bajo": graves, "otros": (audio - graves).astype(np.float32)}
+
+
+# Sin pistas de voz ni batería, solo tienen sentido las recetas que juegan con el bajo y el resto.
+RECETAS_LIGERAS = ("mezcla_larga", "cambio_de_bajo", "eco")
+
+
+def separar_tramo(audio, ligero=False):
     """audio: [n, 2]. Devuelve {voz, bateria, bajo, otros: [n, 2]} con Demucs. "otros" es todo lo
     que no es voz, batería ni bajo, así las cuatro pistas suman exactamente el audio original."""
+    if ligero:
+        return separar_ligero(audio)
     if separador.falta_instalar():
         raise ErrorMezcla("La separación con IA no está instalada.")
     with separador._candado_modelos:
@@ -224,10 +241,11 @@ def preparar(audio_a, ana_a, audio_b, ana_b, plan, cancelado=None):
     b_desde = max(0, int(origen_b[0]) - _MARGEN)
     b_hasta = min(len(audio_b), int(fin_b) + _MARGEN)
     a_desde, a_hasta = max(0, a0 - _MARGEN), min(len(audio_a), a1 + _MARGEN)
-    stems_a = separar_tramo(audio_a[a_desde:a_hasta])
+    ligero = plan.get("ligero", False)
+    stems_a = separar_tramo(audio_a[a_desde:a_hasta], ligero)
     if cancelado and cancelado():
         return None
-    stems_b = separar_tramo(audio_b[b_desde:b_hasta])
+    stems_b = separar_tramo(audio_b[b_desde:b_hasta], ligero)
     if cancelado and cancelado():
         return None
 
