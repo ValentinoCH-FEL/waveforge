@@ -21,6 +21,7 @@ import numpy as np
 import dj_analisis
 import dj_equipo
 import dj_juez
+import dj_letra
 import dj_motor
 from dj_analisis import SR
 
@@ -47,6 +48,17 @@ def pesos_recetas():
     except OSError:
         pass
     return {receta: (buenas + 1) / (total + 2) for receta, (buenas, total) in cuenta.items()}
+
+
+def salidas_de_audio():
+    """[(id, nombre)] de las salidas de audio estéreo del equipo (sin repetirlas por cada driver)."""
+    try:
+        api = sd.query_hostapis(sd.default.hostapi)
+        return [(i, sd.query_devices(i)["name"]) for i in api["devices"]
+                if sd.query_devices(i)["max_output_channels"] >= 2
+                and "sound mapper" not in sd.query_devices(i)["name"].lower()]  # virtual de Windows
+    except Exception:  # noqa: BLE001
+        return []
 
 
 class SesionDJ:
@@ -88,6 +100,10 @@ class SesionDJ:
         self._anticipado = {}
         self._tiempo_preparar = 70.0  # segundos que tarda una mezcla sin nada anticipado (se mide)
         self._anticipando = False
+        self.salida_publico = None      # id de la salida de audio para el público (None = la del sistema)
+        self.salida_auriculares = None  # id de la salida para pre-escuchar la mezcla (None = sin pre-escucha)
+        self._letra = {}              # ruta -> [(inicio_s, fin_s, palabra)] de la voz (Whisper)
+        self._letra_hasta = {}        # ruta -> hasta qué segundo ya se escuchó la letra
         self._escala_timbre = None    # escala de la huella de percusión en esta biblioteca
         # el equipo del cliente: sin medir todavía se asume uno modesto; la medición real se hace
         # en segundo plano la primera vez y queda guardada
@@ -439,7 +455,7 @@ class SesionDJ:
         self._sonadas.add(indice)
         try:
             self._stream = sd.OutputStream(samplerate=SR, channels=2, dtype="float32", callback=self._callback,
-                                           blocksize=2048, latency=0.25)
+                                           blocksize=2048, latency=0.25, device=self.salida_publico)
             self._stream.start()
         except Exception as error:
             self._stream = None
@@ -576,6 +592,13 @@ class SesionDJ:
                         unidas[k] = np.concatenate([viejas[k][:-solapa], cola, pistas[k][solapa:]])
                     region = (r0, hasta, unidas)
                 entrada["regiones"] = [region]
+                # la letra de este tramo (Whisper sobre la voz ya separada): dónde termina cada verso
+                if dj_letra.disponible() and sigue():
+                    nuevo_desde = max(desde, int(self._letra_hasta.get(ruta_a, 0.0) * SR))
+                    if hasta - nuevo_desde > 2 * SR:
+                        voz = region[2]["voz"][nuevo_desde - region[0]:hasta - region[0]]
+                        self._letra.setdefault(ruta_a, []).extend(dj_letra.palabras(voz, SR, nuevo_desde / SR))
+                        self._letra_hasta[ruta_a] = hasta / SR
                 self._al_evento("recomendaciones", "")
         except Exception:  # noqa: BLE001  (anticipar es una ayuda: si falla, se prepara como siempre)
             pass
@@ -611,15 +634,40 @@ class SesionDJ:
                   if ahora + margen(beats[k]) <= beats[k] <= ana["fin_s"] - largo - 2.0]
         if not frases:
             return []
+        # la letra: no ofrecer puntos donde la voz de A se apagaría a mitad de una frase cantada
+        # (las recetas bajan la voz de A entre el 20 % y el 55 % de la transición)
+        ruta = self.biblioteca[indice]["ruta"]
+        letra, escuchada = self._letra.get(ruta, []), self._letra_hasta.get(ruta, 0.0)
+
+        def sobre_la_letra(t):
+            """None si esa parte aún no se escuchó; si no, (corta_la_letra, termina_un_verso)."""
+            a, b = t + 0.2 * largo, t + 0.55 * largo
+            if b > escuchada:
+                return None
+            fin = next((t + x * largo for x in (0.2, 0.3, 0.4) if dj_letra.fin_de_verso(letra, t + x * largo)), None)
+            return dj_letra.cantando(letra, a, b) > 0.35 and fin is None, fin
+
+        frases = [t for t in frases if not (sobre_la_letra(t) or (False,))[0]]
+        if not frases:
+            return []
+
+        def detalle(t):
+            info = sobre_la_letra(t)
+            if info is None or info[1] is None:
+                return ""
+            ultimas = dj_letra.ultimas_palabras(letra, info[1])
+            return f" · termina un verso: «…{ultimas}»" if ultimas else " · la voz descansa"
+
         mono = audio.mean(axis=1)
         def energia(t):
             a, b = int(t * SR), int((t + 8 * 60.0 / ana["bpm"]) * SR)
             return float(np.sqrt(np.mean(np.square(mono[a:b], dtype=np.float64))) + 1e-9)
         media = float(np.median([energia(t) for t in frases]))
-        puntos = [{"segundo": frases[0], "motivo": "el más cercano (inicio de frase)"}]
+        puntos = [{"segundo": frases[0], "motivo": "el más cercano (inicio de frase)" + detalle(frases[0])}]
         respiro = min(frases[1:-1] or frases, key=energia)
         if respiro != frases[0] and energia(respiro) < 0.8 * media:
-            puntos.append({"segundo": respiro, "motivo": "la canción baja de intensidad: buen momento para entrar"})
+            puntos.append({"segundo": respiro,
+                           "motivo": "la canción baja de intensidad: buen momento para entrar" + detalle(respiro)})
         if frases[-1] not in (p["segundo"] for p in puntos):
             puntos.append({"segundo": frases[-1], "motivo": "al final, en su última frase"})
         return sorted(puntos, key=lambda p: p["segundo"])
@@ -755,6 +803,22 @@ class SesionDJ:
             salida.fill(0.0)
 
     # ---------- controles ----------
+
+    def preescuchar(self):
+        """Hace sonar la mezcla ya preparada SOLO por los auriculares, como un DJ antes de lanzarla.
+        El público sigue escuchando la canción. Devuelve False si no hay mezcla lista o salida."""
+        if self.salida_auriculares is None or self.salida_auriculares == self.salida_publico:
+            return False
+        with self._candado:
+            mezcla = next((t for t in self._tramos if t["tipo"] == "mezcla"), None)
+        if mezcla is None:
+            return False
+        sd.play(mezcla["audio"], SR, device=self.salida_auriculares)
+        return True
+
+    @staticmethod
+    def parar_preescucha():
+        sd.stop()  # detiene solo la pre-escucha: la salida del público es otro stream
 
     def mezclar_ya(self):
         """Salta a 5 s antes de la mezcla, si ya está lista."""

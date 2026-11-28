@@ -133,6 +133,24 @@ class PestanaDJ(ttk.Frame):
         self._plan_inicial = True   # el plan todavía es el de fábrica (solo "Variado")
         self._mostrar_plan()
 
+        salidas = ttk.LabelFrame(self.marco_avanzado, text="Salidas de audio (como en una cabina de DJ)")
+        salidas.pack(fill="x", pady=(0, 6))
+        fila_s = ttk.Frame(salidas)
+        fila_s.pack(fill="x", padx=8, pady=8)
+        self._salidas = [(None, "La del sistema")] + dj_sesion.salidas_de_audio()
+        nombres = [n for _, n in self._salidas]
+        ttk.Label(fila_s, text="Público:").pack(side="left")
+        self.var_publico = tk.StringVar(value=nombres[0])
+        combo_p = ttk.Combobox(fila_s, textvariable=self.var_publico, values=nombres, state="readonly", width=28)
+        combo_p.pack(side="left", padx=(6, 14))
+        ttk.Label(fila_s, text="Auriculares (pre-escucha):").pack(side="left")
+        self.var_auriculares = tk.StringVar(value="Sin pre-escucha")
+        combo_a = ttk.Combobox(fila_s, textvariable=self.var_auriculares, state="readonly", width=28,
+                               values=["Sin pre-escucha"] + nombres[1:])
+        combo_a.pack(side="left", padx=6)
+        for combo in (combo_p, combo_a):
+            combo.bind("<<ComboboxSelected>>", lambda e: self._elegir_salidas())
+
         estilo = ttk.LabelFrame(self.marco_avanzado, text="Estilo aprendido de un DJ")
         estilo.pack(fill="x")
         fila_estilo = ttk.Frame(estilo)
@@ -203,6 +221,10 @@ class PestanaDJ(ttk.Frame):
                                           ayuda="Salta a 5 segundos antes de la mezcla (cuando ya está lista)")
         self.boton_mezclar.pack(side="left")
         BotonAnimado(controles, "■  Detener", self._detener, alto=32).pack(side="left", padx=8)
+        self.boton_preescucha = BotonAnimado(controles, "🎧  Escuchar la mezcla", self._preescuchar, alto=32,
+                                             ayuda="Suena SOLO por los auriculares: el público no la oye.\n"
+                                                   "Elige la salida en Opciones avanzadas.")
+        self.boton_preescucha.pack(side="left")
 
         titulo("¿QUÉ TAL LA ÚLTIMA MEZCLA?")
         votos = tk.Frame(caja, bg=tema.FONDO)
@@ -216,6 +238,27 @@ class PestanaDJ(ttk.Frame):
         self.etiqueta_voto = tk.Label(caja, text="", bg=tema.FONDO, fg=tema.TEXTO_SUAVE, anchor="w", justify="left",
                                       wraplength=430)
         self.etiqueta_voto.pack(fill="x", pady=(4, 0))
+
+    def _elegir_salidas(self):
+        por_nombre = {n: i for i, n in self._salidas}
+        publico = por_nombre.get(self.var_publico.get())
+        auriculares = por_nombre.get(self.var_auriculares.get())
+        if auriculares is not None and auriculares == publico:
+            messagebox.showinfo("Modo DJ", "Los auriculares tienen que ser otra salida que la del público.")
+            self.var_auriculares.set("Sin pre-escucha")
+            auriculares = None
+        cambio_publico = publico != self.sesion.salida_publico
+        self.sesion.salida_publico, self.sesion.salida_auriculares = publico, auriculares
+        if cambio_publico and self.sesion.activa:
+            self.etiqueta_voto.config(text="La salida del público cambia la próxima vez que empieces.")
+
+    def _preescuchar(self):
+        if self.sesion.salida_auriculares is None:
+            self.etiqueta_voto.config(text="Elige la salida de los auriculares en Opciones avanzadas.")
+        elif not self.sesion.preescuchar():
+            self.etiqueta_voto.config(text="La mezcla todavía no está lista.")
+        else:
+            self.etiqueta_voto.config(text="🎧 Sonando en los auriculares: así va a quedar el cambio.")
 
     def _alternar_avanzado(self):
         self._avanzado_abierto = not self._avanzado_abierto
@@ -585,7 +628,9 @@ class PestanaDJ(ttk.Frame):
                 if fila and self.tabla.exists(fila):
                     self.tabla.see(fila)
             self.boton_mezclar.habilitar(bool(e["mezcla_lista"]))
+            self.boton_preescucha.habilitar(bool(e["mezcla_lista"]) and self.sesion.salida_auriculares is not None)
         else:
+            self.boton_preescucha.habilitar(False)
             if self._ultimo_indice is not None:
                 self._ultimo_indice = None
             self.etiqueta_titulo.config(text="—")

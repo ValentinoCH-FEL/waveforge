@@ -11,6 +11,7 @@ torch
 demucs-infer
 librosa
 scikit-learn  # el juez de transiciones del modo DJ (IA entrenada con tu música)
+openai-whisper  # el copiloto sabe dónde termina cada verso (licencia MIT; modelo «base» ~140 MB)
 # El modelo karaoke usa la tarjeta gráfica en Windows (DirectML: NVIDIA, AMD o Intel)
 onnxruntime-directml; sys_platform == "win32"
 onnxruntime; sys_platform != "win32"
