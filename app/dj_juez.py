@@ -31,6 +31,9 @@ from dj_analisis import SR
 CARPETA = os.path.join(dj_analisis.CARPETA_DATOS, "juez")
 RUTA_MODELO = os.path.join(CARPETA, "modelo.joblib")
 RUTA_INFO = os.path.join(CARPETA, "modelo.json")
+# Lo que viene con el programa: ejemplos de mezclas ya etiquetadas, para que el juez funcione
+# desde el primer uso en cualquier PC (y se pueda reentrenar ahí mismo con los votos del cliente).
+EJEMPLOS_BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "modelos", "juez_ejemplos.jsonl")
 UMBRAL_EN_RITMO = 1.3  # calce de B sobre la grilla de A desde el que la mezcla "suena en ritmo"
 
 CARACTERISTICAS = (
@@ -121,14 +124,37 @@ def calce_mezcla(audio_a, local_a, audio_b, local_b, plan):
 # ---------- modelo ----------
 
 def _cargar():
+    """El modelo de este equipo. Si no existe (primera vez) o no se puede leer (otra versión de
+    scikit-learn), se entrena ahí mismo con los ejemplos que trae el programa: tarda segundos."""
     global _modelo
-    if _modelo is None and os.path.exists(RUTA_MODELO):
+    if _modelo is None:
         try:
             import joblib
             _modelo = joblib.load(RUTA_MODELO)
         except Exception:  # noqa: BLE001
             _modelo = False
+            if os.path.exists(EJEMPLOS_BASE):
+                try:
+                    from threadpoolctl import threadpool_limits
+                    with threadpool_limits(limits=1):
+                        entrenar(rutas_ejemplos(), votos_guardados())
+                except Exception:  # noqa: BLE001
+                    _modelo = False
     return _modelo or None
+
+
+def rutas_ejemplos():
+    """Los ejemplos que trae el programa, más los que se generaron en este equipo (si hay)."""
+    propios = os.path.join(CARPETA, "ejemplos.jsonl")
+    return [r for r in (EJEMPLOS_BASE, propios) if os.path.exists(r)]
+
+
+def votos_guardados():
+    ruta = os.path.join(CARPETA, "votos.jsonl")
+    if not os.path.exists(ruta):
+        return []
+    with open(ruta, encoding="utf-8") as f:
+        return [json.loads(l) for l in f if l.strip()]
 
 
 def nota(caracteristicas):

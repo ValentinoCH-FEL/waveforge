@@ -128,6 +128,6 @@ if __name__ == "__main__":
         generar(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 1000,
                 semilla=int(sys.argv[4]) if len(sys.argv) > 4 else 1)
     elif len(sys.argv) >= 2 and sys.argv[1] == "entrenar":
-        print(json.dumps(dj_juez.entrenar([RUTA_DATOS], leer_votos()), indent=1, ensure_ascii=False))
+        print(json.dumps(dj_juez.entrenar(dj_juez.rutas_ejemplos(), leer_votos()), indent=1, ensure_ascii=False))
     else:
         print(__doc__)
