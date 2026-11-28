@@ -658,6 +658,8 @@ class PestanaDJ(ttk.Frame):
             self.medidor.actualizar(*self.sesion.nivel)
             if e["indice"] != self._ultimo_indice and not es_mezcla:
                 self._ultimo_indice = e["indice"]
+                self._limpiar_copiloto()   # otra canción: lo elegido para la anterior ya no vale
+                self._actualizar_copiloto()
                 fila = self._filas.get(e["indice"])
                 if fila and self.tabla.exists(fila):
                     self.tabla.see(fila)

@@ -50,6 +50,15 @@ def pesos_recetas():
     return {receta: (buenas + 1) / (total + 2) for receta, (buenas, total) in cuenta.items()}
 
 
+def registrar_error(donde, detalle):
+    try:
+        os.makedirs(dj_analisis.CARPETA_DATOS, exist_ok=True)
+        with open(os.path.join(dj_analisis.CARPETA_DATOS, "errores.log"), "a", encoding="utf-8") as f:
+            f.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} · {donde}" + chr(10) + detalle + chr(10))
+    except OSError:
+        pass
+
+
 def salidas_de_audio():
     """[(id, nombre)] de las salidas de audio estéreo del equipo (sin repetirlas por cada driver)."""
     try:
@@ -465,7 +474,7 @@ class SesionDJ:
             if indice is None:
                 raise RuntimeError("No hay canciones que se puedan reproducir con ese plan.")
         self._anotar_eleccion(None, indice)
-        self._hilo = threading.Thread(target=self._trabajo, args=(indice, self._parar), daemon=True)
+        self._hilo = threading.Thread(target=self._trabajo_seguro, args=(indice, self._parar), daemon=True)
         self._hilo.start()
 
     def detener(self):
@@ -485,10 +494,20 @@ class SesionDJ:
     def activa(self):
         return self._stream is not None
 
+    def _trabajo_seguro(self, indice, parar):
+        """El DJ nunca se muere en silencio: si algo falla, queda escrito (con el detalle) en
+        ~/.waveforge/errores.log y se avisa en pantalla."""
+        try:
+            self._trabajo(indice, parar)
+        except Exception as error:  # noqa: BLE001
+            import traceback
+            registrar_error("trabajo del DJ", traceback.format_exc())
+            self._al_evento("aviso", f"El DJ tuvo un problema: {error}")
+
     def _cargar(self, indice):
         cancion = self.biblioteca[indice]
         anticipada = self._anticipado.get(cancion["ruta"])
-        if anticipada and anticipada.get("audio") is not None:
+        if anticipada and anticipada.get("audio") is not None and anticipada.get("analisis") is not None:
             return anticipada["audio"], anticipada["analisis"]
         audio = dj_analisis.decodificar(cancion["ruta"])
         analisis = dj_analisis.analisis_completo(audio)
@@ -631,9 +650,10 @@ class SesionDJ:
                     return
                 ruta = self.biblioteca[i]["ruta"]
                 entrada = self._anticipado.setdefault(ruta, {"audio": None, "analisis": None, "regiones": []})
-                if entrada["audio"] is None:
-                    entrada["audio"] = dj_analisis.decodificar(ruta)
-                    entrada["analisis"] = dj_analisis.analisis_completo(entrada["audio"])
+                if entrada["audio"] is None or entrada["analisis"] is None:
+                    audio = dj_analisis.decodificar(ruta)
+                    analisis = dj_analisis.analisis_completo(audio)
+                    entrada["analisis"], entrada["audio"] = analisis, audio  # los dos juntos, ya listos
                 inicio = entrada["analisis"]["inicio_s"]
                 separar(ruta, entrada["audio"], inicio - 2.0, inicio + largo_max + 6.0)
             self._al_evento("recomendaciones", "listo")
@@ -823,6 +843,8 @@ class SesionDJ:
                 if resultado is None:
                     return None
             except Exception as error:
+                import traceback
+                registrar_error(f"mezcla con «{cancion_b['titulo']}»", traceback.format_exc())
                 cancion_b["error"] = str(error)
                 self._al_evento("aviso", f"No se pudo mezclar con «{cancion_b['titulo']}»: {error}")
                 continue
@@ -932,9 +954,9 @@ class SesionDJ:
         indice_a, ana_a = tramo_a["indice"], tramo_a.get("analisis")
         if ana_a is None:
             return None
-        if indice_b is None:
+        if indice_b is None or indice_b == indice_a or indice_b in self._sonadas and                 (en_cola is None or indice_b != en_cola["indice"]):
             indice_b = en_cola["indice"] if en_cola else next((r["indice"] for r in self.recomendar(1)), None)
-        if indice_b is None:
+        if indice_b is None or indice_b == indice_a:
             return None
         audio_a = tramo_a["audio"]
         audio_b, ana_b = self._cargar(indice_b)
