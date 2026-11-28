@@ -19,6 +19,7 @@ import time
 import numpy as np
 
 import dj_analisis
+import dj_juez
 import dj_motor
 from dj_analisis import SR
 
@@ -65,6 +66,7 @@ class SesionDJ:
         self.siguiente = None         # título de la que viene
         self.mensaje = ""
         self._ultima_mezcla = None    # registro de la última transición que empezó a sonar
+        self._caracteristicas_de = {}  # id(registro) -> lo que vio el juez, para aprender del voto
         self.nivel = (0.0, 0.0)
         # Plan de la sesión: bloques en orden. genero None = variado (el DJ decide);
         # limite None = sin límite, ("min", 30) o ("canciones", 5). El último bloque no se termina.
@@ -96,7 +98,7 @@ class SesionDJ:
                        "energia": None, "dur": None, "error": None}
             try:
                 guardado = dj_analisis.en_cache(ruta)
-                if guardado and "dur" in guardado:
+                if guardado and guardado.get("v") == dj_analisis.VERSION_ANALISIS:
                     self._aplicar(cancion, guardado)
             except OSError:
                 pass
@@ -215,7 +217,8 @@ class SesionDJ:
         puntajes = []
         for i in con_datos:
             c = self.biblioteca[i]
-            puntaje = -10.0 * abs(np.log(c["bpm"] / bpm_actual))                       # tempo parecido
+            diferencia = dj_motor.relacion_tempo(bpm_actual, c["bpm"])[2]              # cuenta doble/mitad
+            puntaje = -10.0 * abs(np.log1p(diferencia))                                 # tempo parecido
             puntaje += 1.0 if dj_motor.compatibles(bpm_actual, c["bpm"]) else 0.0       # se puede sincronizar
             if dj_analisis.camelot_compatibles(cancion_actual["camelot"] or "", c["camelot"] or ""):
                 puntaje += 0.6                                                          # tonalidad compatible
@@ -357,10 +360,21 @@ class SesionDJ:
                     salir_s = tramo_a["desde_s"] + max(self.estilo["segundos_por_cancion"], 50.0)
                     t = self.estilo["tecnicas"]
                     gusto = {"eco": 0.3 + 2 * t["corte"], "cambio_de_bajo": 0.3 + 2 * t["graves"],
+                             "mezcla_larga": 0.3 + t["fundido"] + t["graves"],
                              "sin_bateria": 0.3 + t["graves"] + t["fundido"], "voz_sobre_ritmo": 0.3 + 2 * t["fundido"]}
                     pesos = {r: pesos.get(r, 0.5) * g for r, g in gusto.items()}
-                plan = dj_motor.planear(ana_a, ana_b, self._rng, pesos, beats=beats, salir_s=salir_s)
-                resultado = dj_motor.preparar(audio_a, ana_a, audio_b, ana_b, plan, cancelado=parar.is_set)
+                # el ritmo se vuelve a medir, fino, justo donde se mezcla (final de A, inicio de B),
+                # y el juez (IA entrenada) elige la lectura del ritmo de B que va a quedar en ritmo
+                caracteristicas, nota_juez = None, None
+                try:
+                    fin_a, opciones = dj_juez.candidatos(audio_a, ana_a, audio_b, ana_b,
+                                                         self.biblioteca[indice], cancion_b, salir_s)
+                    ini_b, nota_juez = dj_juez.elegir(fin_a, opciones)
+                    caracteristicas = next(c for o, c in opciones if o is ini_b)
+                except Exception:  # noqa: BLE001
+                    fin_a, ini_b = dj_motor.afinar(audio_a, ana_a, audio_b, ana_b, salir_s)
+                plan = dj_motor.planear(fin_a, ini_b, self._rng, pesos, beats=beats, salir_s=salir_s)
+                resultado = dj_motor.preparar(audio_a, fin_a, audio_b, ini_b, plan, cancelado=parar.is_set)
                 if resultado is None:
                     return None
             except Exception as error:
@@ -377,7 +391,8 @@ class SesionDJ:
                         "genero_a": a["genero"], "genero_b": cancion_b["genero"],
                         "energia_a": a["energia"], "energia_b": cancion_b["energia"],
                         "receta": plan["receta"], "sincronizada": plan["sincronizada"], "beats": plan["beats"],
-                        "estilo": bool(self.estilo)}
+                        "estilo": bool(self.estilo), "nota_juez": nota_juez}
+            self._caracteristicas_de[id(registro)] = (caracteristicas, cancion_b["titulo"])
             nombre = dj_motor.RECETAS[plan["receta"]]["nombre"]
             tramo_mezcla = {"tipo": "mezcla", "indice": indice_b, "titulo": f"{a['titulo']}  →  {cancion_b['titulo']}",
                             "audio": resultado["mezcla"], "pos": 0, "fin": len(resultado["mezcla"]),
@@ -389,9 +404,24 @@ class SesionDJ:
                 if a_tiempo:
                     tramo_a["fin"] = plan["a0"]
                     self._tramos = [tramo_a, tramo_mezcla, tramo_b]
-                else:  # la canción ya pasó el punto de mezcla: B entra cuando A termine, sin mezcla
+                else:  # la canción ya pasó el punto de mezcla: fundido corto al final de A, nunca de golpe
                     tramo_b["pos"] = int(ana_b["inicio_s"] * SR)
                     self._tramos = self._tramos[:1] + [tramo_b]
+                    actual = self._tramos[0]
+                    fin_a = min(int(ana_a["fin_s"] * SR), len(audio_a))
+                    largo = 6 * SR
+                    if actual is tramo_a and tramo_a["pos"] < fin_a - largo - SR // 2 and \
+                            tramo_b["pos"] + largo < len(audio_b):
+                        t = np.linspace(0.0, 0.5 * np.pi, largo, dtype=np.float32)[:, None]
+                        fundido = (audio_a[fin_a - largo:fin_a] * np.cos(t)
+                                   + audio_b[tramo_b["pos"]:tramo_b["pos"] + largo] * np.sin(t))
+                        tramo_a["fin"] = fin_a - largo
+                        tramo_b["pos"] += largo
+                        registro["receta"], registro["sincronizada"] = "fundido_corto", False
+                        tramo_fundido = {"tipo": "mezcla", "indice": indice_b, "audio": fundido.astype(np.float32),
+                                         "titulo": tramo_mezcla["titulo"], "pos": 0, "fin": largo,
+                                         "registro": registro, "receta": "Fundido corto"}
+                        self._tramos = [tramo_a, tramo_fundido, tramo_b]
             segundos = time.perf_counter() - inicio
             self.mensaje = (f"Lista: «{nombre}» ({segundos:.0f} s en prepararla)" if a_tiempo
                             else "La mezcla no llegó a tiempo: la siguiente entra directa.")
@@ -440,6 +470,10 @@ class SesionDJ:
         os.makedirs(dj_analisis.CARPETA_DATOS, exist_ok=True)
         with open(RUTA_VOTOS, "a", encoding="utf-8") as f:
             f.write(json.dumps(dict(registro, voto=voto), ensure_ascii=False) + "\n")
+        caracteristicas, cancion_b = self._caracteristicas_de.get(id(registro), (None, None))
+        if caracteristicas:  # el voto se vuelve un ejemplo para reentrenar al juez
+            import dj_entrenar
+            dj_entrenar.guardar_voto(caracteristicas, cancion_b, voto)
         self._ultima_mezcla = None  # un voto por transición
         return f"{registro['a']} → {registro['b']}"
 

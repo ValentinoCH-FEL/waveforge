@@ -10,6 +10,7 @@ yt-dlp
 torch
 demucs-infer
 librosa
+scikit-learn  # el juez de transiciones del modo DJ (IA entrenada con tu música)
 # El modelo karaoke usa la tarjeta gráfica en Windows (DirectML: NVIDIA, AMD o Intel)
 onnxruntime-directml; sys_platform == "win32"
 onnxruntime; sys_platform != "win32"
