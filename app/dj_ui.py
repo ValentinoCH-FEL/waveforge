@@ -427,7 +427,7 @@ class PestanaDJ(ttk.Frame):
                 self.tabla.item(fila, values=clave[0], tags=etiquetas)
                 self._valores_mostrados[i] = clave
         if biblioteca:
-            hechas = self.sesion.analizadas()
+            hechas = self.sesion.preparadas()  # cuenta también las dañadas que se descartaron
             texto = (f"{len(biblioteca)} canciones" if hechas >= len(biblioteca)
                      else f"{len(biblioteca)} canciones · analizando {hechas} de {len(biblioteca)}...")
             self.etiqueta_biblioteca.config(text=texto)

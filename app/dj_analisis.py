@@ -248,7 +248,7 @@ def camelot_compatibles(a, b):
 # ---------- análisis rápido, guardado en disco ----------
 
 _cache = None
-VERSION_ANALISIS = 2  # subirla cuando cambie el análisis: lo guardado antes se vuelve a medir
+VERSION_ANALISIS = 3  # subirla cuando cambie el análisis: lo guardado antes se vuelve a medir
 
 
 def _leer_cache():
@@ -297,16 +297,77 @@ def analisis_rapido(ruta):
     bpm, _ = _bpm_y_beats(mono)
     # librosa da el tempo en escalones (95.7, 103.4, 112.3...); la grilla fina busca el valor
     # exacto cerca de ese (±6 %), que en 60 s es estable aunque la canción se grabe en vivo
-    bpm = _grilla_fina(mono, bpm)[0]
+    bpm, fase_s, _c, _s = _grilla_fina(mono, bpm)
     tono, camelot = _tonalidad(mono)
+    patron, timbre = huella_percusion(mono, bpm, fase_s)
     # energía: qué tan fuerte y "lleno" suena (volumen medio en dB); sirve para no saltar de una
     # canción tranquila a una muy intensa
     energia = 20.0 * np.log10(float(np.sqrt(np.mean(np.square(mono, dtype=np.float64)))) + 1e-9)
     datos = {"bpm": round(bpm, 1), "tono": tono, "camelot": camelot, "energia": round(float(energia), 1),
              "dur": round(meta["dur"], 1), "artista_tag": meta["artista"], "titulo_tag": meta["titulo"],
-             "genero_tag": meta["genero"], "v": VERSION_ANALISIS}
+             "genero_tag": meta["genero"], "patron": patron, "timbre": timbre, "v": VERSION_ANALISIS}
     _leer_cache()[_clave(ruta)] = datos
     return datos
+
+
+# ---------- huella de la percusión: «¿esta batería se parece a aquella?» ----------
+
+PASOS_COMPAS = 16  # el compás (4 beats) dividido en semicorcheas
+
+
+def huella_percusion(mono, bpm, fase_s):
+    """Dos huellas de la percusión (sin voz ni melodía: se separa con HPSS, armónico/percusivo):
+      - patron: dónde golpea dentro del compás, 16 posiciones promediadas sobre todos los compases;
+      - timbre: cómo suena (13 coeficientes MFCC promedio: bombo grave, platillos brillantes...).
+    Dos canciones con huellas parecidas tienen baterías parecidas: buenas para mezclar por ahí."""
+    import librosa
+
+    percusion = librosa.effects.percussive(mono, margin=2.0)
+    hop = 256
+    golpes = librosa.onset.onset_strength(y=percusion, sr=SR_ANALISIS, hop_length=hop)
+    fps = SR_ANALISIS / hop
+    paso = 60.0 / bpm / 4.0
+    tiempos = np.arange(fase_s, len(golpes) / fps - 60.0 / bpm * 4, paso)
+    valores = np.interp(tiempos * fps, np.arange(len(golpes)), golpes)
+    compases = len(valores) // PASOS_COMPAS
+    if compases < 2:
+        patron = np.zeros(PASOS_COMPAS)
+    else:
+        patron = valores[:compases * PASOS_COMPAS].reshape(compases, PASOS_COMPAS).mean(axis=0)
+        patron = patron / (np.linalg.norm(patron) + 1e-9)
+    mfcc = librosa.feature.mfcc(y=percusion, sr=SR_ANALISIS, n_mfcc=13).mean(axis=1)
+    return [round(float(v), 4) for v in patron], [round(float(v), 2) for v in mfcc]
+
+
+def escala_timbre(canciones):
+    """Media y desvío del timbre en la biblioteca: el timbre se compara relativo a la música que
+    hay (si no, todas las baterías parecen iguales). canciones: dicts del análisis rápido."""
+    t = np.array([c["timbre"][1:] for c in canciones if c and c.get("timbre")])
+    if len(t) < 3:
+        return None
+    return t.mean(axis=0), t.std(axis=0) + 1e-9
+
+
+def parecido_percusion(a, b, escala=None):
+    """0 a 1: qué tan parecidas son dos baterías (None sin datos). En una biblioteca real, por
+    encima de ~0,65 suenan muy parecidas y por debajo de ~0,4 no tienen nada que ver.
+      - ritmo: correlación de los patrones de golpes (centrados), probando el compás corrido de a
+        un beat, porque el «uno» de cada canción puede estar medido en otro beat;
+      - timbre: distancia entre las huellas, normalizadas con la escala de la biblioteca."""
+    if not a or not b or not a.get("patron") or not b.get("patron"):
+        return None
+    pa = np.array(a["patron"]) - np.mean(a["patron"])
+    pb = np.array(b["patron"]) - np.mean(b["patron"])
+    norma = np.linalg.norm(pa) * np.linalg.norm(pb) + 1e-9
+    ritmo = max(float(np.dot(pa, np.roll(pb, 4 * k)) / norma) for k in range(4))
+    ta, tb = np.array(a["timbre"][1:]), np.array(b["timbre"][1:])
+    if escala is not None:
+        media, desvio = escala
+        ta, tb = (ta - media) / desvio, (tb - media) / desvio
+        timbre = float(np.exp(-np.linalg.norm(ta - tb) / 4.0))
+    else:
+        timbre = float(np.exp(-np.linalg.norm(ta - tb) / 60.0))
+    return max(0.0, min(1.0, 0.6 * (ritmo + 1.0) / 2.0 + 0.4 * timbre))
 
 
 def listar_canciones(carpeta):

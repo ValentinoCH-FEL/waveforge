@@ -120,8 +120,12 @@ class SesionDJ:
         """Pasa a la canción lo que dio el análisis (y las etiquetas del archivo, donde falte algo)."""
         for clave in ("bpm", "tono", "camelot", "energia", "dur"):
             cancion[clave] = datos.get(clave)
-        cancion["artista"] = datos.get("artista_tag") or cancion["artista"]
-        cancion["titulo"] = datos.get("titulo_tag") or cancion["titulo"]
+        # El nombre del archivo («Artista - Título.mp3») manda: las etiquetas internas de los MP3
+        # suelen venir mal (otro artista, «lyrics», «Official Music Video»). Solo se usan si el
+        # nombre no trae el artista.
+        if not cancion["artista"]:
+            cancion["artista"] = datos.get("artista_tag")
+            cancion["titulo"] = datos.get("titulo_tag") or cancion["titulo"]
         if not cancion["de_carpeta"] and datos.get("genero_tag"):
             cancion["genero"] = datos["genero_tag"]
 

@@ -74,6 +74,8 @@ RECETAS = {
         "B": {s: _entra(.5) for s in STEMS},
     },
 }
+# No se elige al azar: preparar() la arma sola cuando B empieza sin batería (ver _puente_de_bateria).
+RECETAS["puente_bateria"] = {"nombre": "Puente de batería", "A": {}, "B": {}}
 SINCRONIZADAS = ("mezcla_larga", "cambio_de_bajo", "sin_bateria", "voz_sobre_ritmo", "eco")
 # Cuánto se usa cada una antes de tener votos: las suaves, más; el corte con eco es para variar.
 PREFERENCIA = {"mezcla_larga": 3.0, "cambio_de_bajo": 2.0, "sin_bateria": 1.5, "voz_sobre_ritmo": 1.0, "eco": 0.3}
@@ -214,6 +216,37 @@ def _limitar(x):
     return np.where(a > 0.8, np.sign(x) * (0.8 + 0.2 * np.tanh((a - 0.8) / 0.2)), x).astype(np.float32)
 
 
+def _energia_por_beat(pista, beats_rel):
+    """Energía (RMS) de una pista en cada beat de la transición."""
+    bordes = np.clip(np.round(beats_rel).astype(int), 0, len(pista))
+    return np.array([float(np.sqrt(np.mean(np.square(pista[i:j], dtype=np.float64)))) if j > i else 0.0
+                     for i, j in zip(bordes[:-1], bordes[1:])])
+
+
+def _puente_de_bateria(tramo_a, tramo_b, beats_rel, beats):
+    """Si B arranca sin batería (una intro de guitarra o piano) y A sí tiene, arma la receta
+    «Puente de batería»: de A se van primero la voz, la melodía y el bajo, y su batería sigue
+    marcando el ritmo bajo la intro de B; en el «uno» donde entra la batería de B, la de A se
+    corta (con un beat de fundido). Si B no tiene esa intro, devuelve None.
+    Se mide qué parte del sonido de cada beat es batería: en una intro de guitarra es casi 0."""
+    def fraccion(tramo):
+        bateria = _energia_por_beat(tramo["bateria"], beats_rel)
+        total = _energia_por_beat(sum(tramo[s] for s in STEMS), beats_rel)
+        return bateria / (total + 1e-9)
+
+    fa, fb = fraccion(tramo_a), fraccion(tramo_b)
+    if not (fa[:8].mean() > 0.15 and fb[:8].mean() < 0.12):
+        return None
+    # primer «uno» (cada 4 beats) desde el que la batería de B ya suena de verdad
+    entra = next((k for k in range(4, beats - 3, 4) if fb[k:k + 4].mean() > 0.2), beats - 4)
+    corte = entra / beats
+    return {
+        "nombre": "Puente de batería",
+        "A": {"bateria": _corte(corte), "voz": _baja(0.0, 0.125), "bajo": _baja(0.0, 0.125), "otros": _baja(0.0, 0.25)},
+        "B": {s: _sube(0.0, _E) for s in STEMS},
+    }
+
+
 def preparar(audio_a, ana_a, audio_b, ana_b, plan, cancelado=None):
     """Construye el audio de la transición según el plan.
     Devuelve {mezcla: [m, 2], b_continua: muestra de B donde sigue sola a velocidad normal}."""
@@ -249,11 +282,22 @@ def preparar(audio_a, ana_a, audio_b, ana_b, plan, cancelado=None):
     if cancelado and cancelado():
         return None
 
+    # --- las pistas de los dos tramos, alineadas beat a beat ---
+    tramo_a = {s: stems_a[s][a0 - a_desde:a0 - a_desde + n] for s in STEMS}
+    tramo_b = {s: _muestrear(stems_b[s], origen_b - b_desde).astype(np.float32) for s in STEMS}
+
+    # --- puente de batería: si B empieza sin batería (guitarra, piano), la de A marca el ritmo ---
+    if plan["sincronizada"] and not ligero:
+        puente = _puente_de_bateria(tramo_a, tramo_b, beats_a, BEATS)
+        if puente is not None:
+            receta = puente
+            plan["receta"] = "puente_bateria"
+
     # --- aplicar la receta ---
     mezcla = np.zeros((n, 2), dtype=np.float32)
     for s in STEMS:
-        mezcla += stems_a[s][a0 - a_desde:a0 - a_desde + n] * _envolvente(receta["A"][s], fraccion)
-        mezcla += (_muestrear(stems_b[s], origen_b - b_desde) * _envolvente(receta["B"][s], fraccion)).astype(np.float32)
+        mezcla += tramo_a[s] * _envolvente(receta["A"][s], fraccion)
+        mezcla += tramo_b[s] * _envolvente(receta["B"][s], fraccion)
 
     if "eco" in receta:  # el último beat de A antes del corte se repite, cada vez más bajo
         corte = int(np.interp(receta["eco"], np.linspace(0, 1, BEATS + 1), beats_a))
