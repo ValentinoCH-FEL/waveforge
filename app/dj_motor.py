@@ -133,7 +133,7 @@ def afinar(audio_a, ana_a, audio_b, ana_b, salir_s=None):
     return local_a, local_b
 
 
-def planear(ana_a, ana_b, rng, pesos=None, beats=BEATS, salir_s=None):
+def planear(ana_a, ana_b, rng, pesos=None, beats=BEATS, salir_s=None, entrar_s=None):
     """Decide dónde y cómo mezclar. Devuelve un plan (dict) o lanza ErrorMezcla si no hay lugar.
     beats: largo de la transición. salir_s: segundo de A donde debe terminar la mezcla (estilo
     aprendido de un DJ que cambia rápido); por defecto, cerca del final de la canción."""
@@ -146,12 +146,21 @@ def planear(ana_a, ana_b, rng, pesos=None, beats=BEATS, salir_s=None):
     # frase (cada 16 beats desde un "uno"); si no cabe, al menos en un "uno" de compás
     limite = ana_a["fin_s"] - 1.0 if salir_s is None else min(salir_s, ana_a["fin_s"] - 1.0)
     i_fin = int(np.searchsorted(beats_a, limite)) - 1
-    i0 = i_fin - beats * paso_a
-    for bloque in (FRASE * paso_a, 4):
-        candidato = i0 - (i0 - ana_a["fase"]) % bloque
-        if candidato >= 8:
-            i0 = candidato
-            break
+    if entrar_s is not None:
+        # el DJ eligió dónde: la mezcla empieza en el primer inicio de frase (o de compás) desde ahí
+        i0 = int(np.searchsorted(beats_a, entrar_s))
+        for bloque in (FRASE * paso_a, 4):
+            candidato = i0 + (ana_a["fase"] - i0) % bloque
+            if candidato + beats * paso_a < len(beats_a):
+                i0 = candidato
+                break
+    else:
+        i0 = i_fin - beats * paso_a
+        for bloque in (FRASE * paso_a, 4):
+            candidato = i0 - (i0 - ana_a["fase"]) % bloque
+            if candidato >= 8:
+                i0 = candidato
+                break
     # B: entra en su primer "uno" con música
     j0 = int(np.searchsorted(beats_b, ana_b["inicio_s"]))
     j0 += (ana_b["fase"] - j0) % 4

@@ -81,6 +81,9 @@ class SesionDJ:
         self._racha = 0               # modo variado: canciones seguidas del mismo género...
         self._racha_objetivo = 4      # ...y cuántas se quiere antes de cambiar
         self.genero_prioridad = None  # el género que el usuario eligió: se prepara primero
+        self._pedido = None           # copiloto: {indice, entrar_s} que eligió el DJ
+        self._actual = None           # (indice, audio, análisis, tramo) de la canción que suena
+        self._escala_timbre = None    # escala de la huella de percusión en esta biblioteca
         # el equipo del cliente: sin medir todavía se asume uno modesto; la medición real se hace
         # en segundo plano la primera vez y queda guardada
         self.equipo = dj_equipo.perfil(medir=False)
@@ -91,6 +94,7 @@ class SesionDJ:
 
     def cargar_carpeta(self, carpeta):
         self._generacion += 1
+        self._escala_timbre = None
         self.carpeta = carpeta
         rutas = dj_analisis.listar_canciones(carpeta)
         self.biblioteca = []
@@ -118,7 +122,7 @@ class SesionDJ:
     @staticmethod
     def _aplicar(cancion, datos):
         """Pasa a la canción lo que dio el análisis (y las etiquetas del archivo, donde falte algo)."""
-        for clave in ("bpm", "tono", "camelot", "energia", "dur"):
+        for clave in ("bpm", "tono", "camelot", "energia", "dur", "patron", "timbre"):
             cancion[clave] = datos.get(clave)
         # El nombre del archivo («Artista - Título.mp3») manda: las etiquetas internas de los MP3
         # suelen venir mal (otro artista, «lyrics», «Official Music Video»). Solo se usan si el
@@ -186,6 +190,7 @@ class SesionDJ:
             if pool is not None:
                 pool.shutdown(wait=False, cancel_futures=True)
         dj_analisis.guardar_cache()
+        self._escala_timbre = None  # con toda la biblioteca analizada, la escala es más fiel
         if generacion == self._generacion:
             self._al_evento("biblioteca", "lista")
 
@@ -276,20 +281,69 @@ class SesionDJ:
         if bpm_actual is None:  # primera canción de la sesión
             return int(self._rng.choice(con_datos))
 
-        puntajes = []
-        for i in con_datos:
+        recomendadas = self._puntuar(actual, bpm_actual, con_datos, azar=True)
+        return recomendadas[0]["indice"]
+
+    def _puntuar(self, actual, bpm_actual, candidatas, azar=False):
+        """Ordena las candidatas con criterio de DJ y explica cada puntaje en palabras:
+        tempo que se pueda igualar, tonalidad compatible, batería parecida (huella de percusión),
+        energía parecida y, si se pidió, el mismo artista. Devuelve [{indice, puntaje, razones}]."""
+        cancion_actual = self.biblioteca[actual]
+        if self._escala_timbre is None:
+            self._escala_timbre = dj_analisis.escala_timbre(self.biblioteca)
+        lista = []
+        for i in candidatas:
             c = self.biblioteca[i]
-            diferencia = dj_motor.relacion_tempo(bpm_actual, c["bpm"])[2]              # cuenta doble/mitad
+            razones = []
+            paso_a, paso_b, diferencia = dj_motor.relacion_tempo(bpm_actual, c["bpm"])
             puntaje = -10.0 * abs(np.log1p(diferencia))                                 # tempo parecido
-            puntaje += 1.0 if dj_motor.compatibles(bpm_actual, c["bpm"]) else 0.0       # se puede sincronizar
+            if dj_motor.compatibles(bpm_actual, c["bpm"]):
+                puntaje += 1.0                                                          # se puede sincronizar
+                cambio = 100.0 * (c["bpm"] * (paso_a / paso_b) / bpm_actual - 1.0)
+                razones.append(f"{c['bpm']:.0f} BPM ({cambio:+.0f} %)" +
+                               (" · doble/mitad de tempo" if paso_a != paso_b else ""))
+            else:
+                razones.append(f"{c['bpm']:.0f} BPM: tempo muy distinto (corte con eco)")
             if dj_analisis.camelot_compatibles(cancion_actual["camelot"] or "", c["camelot"] or ""):
                 puntaje += 0.6                                                          # tonalidad compatible
+                razones.append(f"tonalidad compatible ({cancion_actual['camelot']} → {c['camelot']})")
+            parecido = dj_analisis.parecido_percusion(cancion_actual, c, self._escala_timbre)
+            if parecido is not None:
+                puntaje += 3.0 * (parecido - 0.5)                                       # batería parecida
+                if parecido >= 0.6:
+                    razones.append(f"batería {100 * parecido:.0f} % parecida: buena para mezclar por la batería")
             if cancion_actual["energia"] is not None and c["energia"] is not None:
-                puntaje -= 0.06 * abs(c["energia"] - cancion_actual["energia"])         # energía parecida
-            if self.preferir_artista and c["artista"] and c["artista"] == cancion_actual["artista"]:
-                puntaje += 1.0
-            puntajes.append(puntaje + self._rng.uniform(0.0, 0.5))                      # azar
-        return con_datos[int(np.argmax(puntajes))]
+                delta = c["energia"] - cancion_actual["energia"]
+                puntaje -= 0.06 * abs(delta)                                            # energía parecida
+                razones.append("misma energía" if abs(delta) < 2 else
+                               ("sube la energía" if delta > 0 else "baja la energía"))
+            if c["artista"] and c["artista"] == cancion_actual["artista"]:
+                razones.append("mismo artista")
+                if self.preferir_artista:
+                    puntaje += 1.0
+            if azar:
+                puntaje += self._rng.uniform(0.0, 0.5)                                  # cada sesión, distinta
+            lista.append({"indice": i, "puntaje": puntaje, "razones": razones, "parecido": parecido})
+        lista.sort(key=lambda r: -r["puntaje"])
+        return lista
+
+    def recomendar(self, cuantas=5):
+        """Las mejores canciones para seguir a la que suena, con sus razones (el copiloto).
+        Respeta el plan de géneros. Lista vacía si no suena nada."""
+        with self._candado:
+            actual = next((t for t in self._tramos if t["tipo"] == "cancion"), None)
+        if actual is None:
+            return []
+        indice = actual["indice"]
+        bpm = (actual.get("analisis") or {}).get("bpm") or self.biblioteca[indice]["bpm"]
+        if bpm is None:
+            return []
+        pendientes = [i for i, c in enumerate(self.biblioteca)
+                      if i != indice and i not in self._sonadas and c["error"] is None and c["bpm"] is not None]
+        genero = self._genero_del_plan()
+        if genero is not None:
+            pendientes = [i for i in pendientes if self.biblioteca[i]["genero"] == genero] or pendientes
+        return self._puntuar(indice, bpm, pendientes)[:cuantas]
 
     def _anotar_eleccion(self, anterior, nueva):
         """Lleva la cuenta del bloque y de la racha de género tras elegir una canción."""
@@ -371,6 +425,7 @@ class SesionDJ:
         if parar.is_set():
             return
         tramo_a = self._tramo_cancion(indice, audio_a, desde=int(ana_a["inicio_s"] * SR))
+        tramo_a["analisis"] = ana_a
         with self._candado:
             self._tramos = [tramo_a]
         self._sonadas.add(indice)
@@ -384,28 +439,77 @@ class SesionDJ:
             return
 
         while not parar.is_set():
+            self._actual = (indice, audio_a, ana_a, tramo_a)
+            self._al_evento("recomendaciones", "")
             tramo_b = self._preparar_siguiente(indice, audio_a, ana_a, tramo_a, parar)
             if tramo_b is None:
                 break
-            # esperar a que B sea lo que suena; ahí A ya no se necesita y se descarta
+            # esperar a que B sea lo que suena; ahí A ya no se necesita y se descarta. Mientras
+            # tanto, si el DJ elige otra canción o dónde cambiar (copiloto), la mezcla se rehace.
             while not parar.is_set():
                 with self._candado:
                     actual = self._tramos[0] if self._tramos else None
                 if actual is tramo_b or actual is None:
                     break
+                pedido, self._pedido = self._pedido, None
+                if pedido and actual is tramo_a:
+                    anterior = tramo_b["indice"]
+                    nuevo = self._preparar_siguiente(indice, audio_a, ana_a, tramo_a, parar,
+                                                     indice_b=pedido.get("indice", anterior),
+                                                     entrar_s=pedido.get("entrar_s"))
+                    if nuevo is not None:
+                        if nuevo["indice"] != anterior:
+                            self._sonadas.discard(anterior)
+                        tramo_b = nuevo
                 time.sleep(0.3)
+            self._pedido = None
             indice, audio_a, ana_a, tramo_a = tramo_b["indice"], tramo_b["audio"], tramo_b["analisis"], tramo_b
         self.siguiente = None
         if not parar.is_set():
             self.mensaje = "No quedan más canciones para mezclar."
             self._al_evento("estado", "")
 
-    def _preparar_siguiente(self, indice, audio_a, ana_a, tramo_a, parar):
-        """Elige B, arma la transición y la encola. Devuelve el tramo de B, o None si no hay más."""
-        for _intento in range(4):
+    def pedir(self, indice=None, entrar_s=None):
+        """El copiloto: el DJ elige la siguiente canción (indice) y/o dónde cambiar (entrar_s,
+        segundo de la canción que suena). La mezcla se rehace con eso mientras suena la actual."""
+        self._pedido = {k: v for k, v in (("indice", indice), ("entrar_s", entrar_s)) if v is not None}
+
+    def puntos_de_cambio(self):
+        """Dónde conviene cambiar en la canción que suena, desde ahora: inicios de frase a los que
+        se llega a tiempo de preparar la mezcla. Hasta 3: el más cercano, donde la canción baja de
+        intensidad (un respiro: buen lugar para entrar) y el final. [{segundo, motivo}]"""
+        if self._actual is None:
+            return []
+        indice, audio, ana, tramo = self._actual
+        ahora = tramo["pos"] / SR
+        preparar = 45.0 if self.equipo.get("separar_con_ia", True) else 12.0
+        beats, fase = ana["beats"], ana["fase"]
+        largo = dj_motor.BEATS * 60.0 / ana["bpm"]
+        frases = [float(beats[k]) for k in range(fase % 4, len(beats), dj_motor.FRASE)
+                  if ahora + preparar <= beats[k] <= ana["fin_s"] - largo - 2.0]
+        if not frases:
+            return []
+        mono = audio.mean(axis=1)
+        def energia(t):
+            a, b = int(t * SR), int((t + 8 * 60.0 / ana["bpm"]) * SR)
+            return float(np.sqrt(np.mean(np.square(mono[a:b], dtype=np.float64))) + 1e-9)
+        media = float(np.median([energia(t) for t in frases]))
+        puntos = [{"segundo": frases[0], "motivo": "el más cercano (inicio de frase)"}]
+        respiro = min(frases[1:-1] or frases, key=energia)
+        if respiro != frases[0] and energia(respiro) < 0.8 * media:
+            puntos.append({"segundo": respiro, "motivo": "la canción baja de intensidad: buen momento para entrar"})
+        if frases[-1] not in (p["segundo"] for p in puntos):
+            puntos.append({"segundo": frases[-1], "motivo": "al final, en su última frase"})
+        return sorted(puntos, key=lambda p: p["segundo"])
+
+    def _preparar_siguiente(self, indice, audio_a, ana_a, tramo_a, parar, indice_b=None, entrar_s=None):
+        """Elige B (o usa la que pidió el DJ), arma la transición (al final, o desde entrar_s) y la
+        encola. Devuelve el tramo de B, o None si no hay más."""
+        elegida = indice_b
+        for _intento in range(1 if elegida is not None else 4):
             if parar.is_set():
                 return None
-            indice_b = self._elegir(indice, ana_a["bpm"])
+            indice_b = elegida if elegida is not None else self._elegir(indice, ana_a["bpm"])
             if indice_b is None:
                 return None
             cancion_b = self.biblioteca[indice_b]
@@ -425,6 +529,8 @@ class SesionDJ:
                              "mezcla_larga": 0.3 + t["fundido"] + t["graves"],
                              "sin_bateria": 0.3 + t["graves"] + t["fundido"], "voz_sobre_ritmo": 0.3 + 2 * t["fundido"]}
                     pesos = {r: pesos.get(r, 0.5) * g for r, g in gusto.items()}
+                if entrar_s is not None:  # el DJ eligió dónde cambiar: el ritmo de A se mide ahí
+                    salir_s = entrar_s + 2.0 * beats * 60.0 / ana_a["bpm"] + 3.0
                 # el ritmo se vuelve a medir, fino, justo donde se mezcla (final de A, inicio de B),
                 # y el juez (IA entrenada) elige la lectura del ritmo de B que va a quedar en ritmo
                 caracteristicas, nota_juez = None, None
@@ -439,7 +545,8 @@ class SesionDJ:
                 if ligero:
                     pesos = {r: (pesos.get(r, 0.5) if r in dj_motor.RECETAS_LIGERAS else 0.0)
                              for r in dj_motor.SINCRONIZADAS}
-                plan = dj_motor.planear(fin_a, ini_b, self._rng, pesos, beats=beats, salir_s=salir_s)
+                plan = dj_motor.planear(fin_a, ini_b, self._rng, pesos, beats=beats, salir_s=salir_s,
+                                        entrar_s=entrar_s)
                 plan["ligero"] = ligero
                 resultado = dj_motor.preparar(audio_a, fin_a, audio_b, ini_b, plan, cancelado=parar.is_set)
                 if resultado is None:
