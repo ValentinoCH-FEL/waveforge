@@ -25,7 +25,11 @@ _MARGEN = SR                  # audio extra a cada lado del tramo que se separa 
 _E = 1.0 / BEATS              # un "corte" dura un beat entero: cambia en el beat, pero sin chasquido
 FRASE = 16                    # las mezclas empiezan al inicio de una frase (4 compases), como un DJ
 
-STEMS = ("voz", "bateria", "bajo", "otros")
+# Las seis pistas de Demucs. «otros» es todo lo demás: en salsa, sobre todo los metales
+# (trompetas y trombones), además de congas, violines y teclados.
+STEMS = ("voz", "bateria", "bajo", "guitarra", "piano", "otros")
+MELODICOS = ("guitarra", "piano", "otros")   # los que pueden hacer de puente entre dos canciones
+NOMBRE_INSTRUMENTO = {"guitarra": "guitarra", "piano": "piano", "otros": "metales"}
 
 
 def _corte(f): return [(0, 1), (f, 1), (f + _E, 0), (1, 0)]
@@ -76,6 +80,7 @@ RECETAS = {
 }
 # No se elige al azar: preparar() la arma sola cuando B empieza sin batería (ver _puente_de_bateria).
 RECETAS["puente_bateria"] = {"nombre": "Puente de batería", "A": {}, "B": {}}
+RECETAS["puente_instrumento"] = {"nombre": "Puente de instrumento", "A": {}, "B": {}}
 SINCRONIZADAS = ("mezcla_larga", "cambio_de_bajo", "sin_bateria", "voz_sobre_ritmo", "eco")
 # Cuánto se usa cada una antes de tener votos: las suaves, más; el corte con eco es para variar.
 PREFERENCIA = {"mezcla_larga": 3.0, "cambio_de_bajo": 2.0, "sin_bateria": 1.5, "voz_sobre_ritmo": 1.0, "eco": 0.3}
@@ -185,7 +190,8 @@ def separar_ligero(audio):
 
     graves = sosfiltfilt(butter(4, 150, btype="low", fs=SR, output="sos"), audio, axis=0).astype(np.float32)
     cero = np.zeros_like(audio)
-    return {"voz": cero, "bateria": cero, "bajo": graves, "otros": (audio - graves).astype(np.float32)}
+    return {"voz": cero, "bateria": cero, "bajo": graves, "guitarra": cero, "piano": cero,
+            "otros": (audio - graves).astype(np.float32)}
 
 
 # Sin pistas de voz ni batería, solo tienen sentido las recetas que juegan con el bajo y el resto.
@@ -201,8 +207,11 @@ def separar_tramo(audio, ligero=False):
         raise ErrorMezcla("La separación con IA no está instalada.")
     with separador._candado_modelos:
         partes = separador._separar_demucs(np.ascontiguousarray(audio.T), SR)
-    stems = {s: np.ascontiguousarray(partes[s].T) for s in ("voz", "bateria", "bajo")}
-    stems["otros"] = audio - stems["voz"] - stems["bateria"] - stems["bajo"]
+    cero = np.zeros_like(audio)
+    stems = {s: (np.ascontiguousarray(partes[s].T) if s in partes else cero)
+             for s in ("voz", "bateria", "bajo", "guitarra", "piano")}
+    # «otros» es la resta: así las seis pistas suman exactamente el audio original
+    stems["otros"] = (audio - sum(stems.values())).astype(np.float32)
     return stems
 
 
@@ -264,6 +273,37 @@ def _puente_de_bateria(tramo_a, tramo_b, beats_rel, beats):
     }
 
 
+def _fracciones(tramo, beats_rel):
+    """Por cada pista, qué parte del sonido de cada beat es de ella (0 a 1)."""
+    total = _energia_por_beat(sum(tramo[s] for s in STEMS), beats_rel) + 1e-9
+    return {s: _energia_por_beat(tramo[s], beats_rel) / total for s in STEMS}
+
+
+def _puente_de_instrumento(tramo_a, tramo_b, beats_rel, beats):
+    """Si las dos canciones tienen fuerte el mismo instrumento donde se mezclan (guitarra, piano
+    o metales), ese instrumento hace de puente: el de A sigue sonando sobre el ritmo de B, y en
+    el «uno» de la mitad se intercambia por el de B. El ritmo (batería y bajo) pasa a B en el
+    primer cuarto; las voces nunca se pisan. Devuelve la receta o None."""
+    fa, fb = _fracciones(tramo_a, beats_rel), _fracciones(tramo_b, beats_rel)
+    mitad = beats // 2
+    candidatos = []
+    for s in MELODICOS:
+        a = float(fa[s][:mitad].mean())          # A, mientras hace de puente
+        b = float(fb[s][mitad:].mean())          # B, cuando lo recibe
+        if a > 0.2 and b > 0.2:
+            candidatos.append((min(a, b), s))
+    if not candidatos:
+        return None
+    _, instrumento = max(candidatos)
+    receta_a = {"voz": _baja(0.0, 0.2), "bateria": _corte(0.25), "bajo": _corte(0.25), "guitarra": _baja(0.0, 0.25),
+                "piano": _baja(0.0, 0.25), "otros": _baja(0.0, 0.25)}
+    receta_b = {"voz": _sube(0.75, 0.875), "bateria": _entra(0.25), "bajo": _entra(0.25), "guitarra": _sube(0.125, 0.375),
+                "piano": _sube(0.125, 0.375), "otros": _sube(0.125, 0.375)}
+    receta_a[instrumento] = _corte(0.5)     # el de A sigue hasta la mitad...
+    receta_b[instrumento] = _entra(0.5)     # ...y en ese «uno» lo toma el de B
+    return {"nombre": f"Puente de {NOMBRE_INSTRUMENTO[instrumento]}", "A": receta_a, "B": receta_b}
+
+
 def preparar(audio_a, ana_a, audio_b, ana_b, plan, cancelado=None):
     """Construye el audio de la transición según el plan.
     Devuelve {mezcla: [m, 2], b_continua: muestra de B donde sigue sola a velocidad normal}."""
@@ -310,12 +350,17 @@ def preparar(audio_a, ana_a, audio_b, ana_b, plan, cancelado=None):
         if puente is not None:
             receta = puente
             plan["receta"] = "puente_bateria"
+        elif plan["receta"] != "eco":
+            puente = _puente_de_instrumento(tramo_a, tramo_b, beats_a, BEATS)
+            if puente is not None:
+                receta, plan["receta"] = puente, "puente_instrumento"
+                RECETAS["puente_instrumento"]["nombre"] = puente["nombre"]
 
     # --- aplicar la receta ---
     mezcla = np.zeros((n, 2), dtype=np.float32)
-    for s in STEMS:
-        mezcla += tramo_a[s] * _envolvente(receta["A"][s], fraccion)
-        mezcla += tramo_b[s] * _envolvente(receta["B"][s], fraccion)
+    for s in STEMS:  # las recetas que no nombran guitarra o piano los tratan como «otros»
+        mezcla += tramo_a[s] * _envolvente(receta["A"].get(s, receta["A"]["otros"]), fraccion)
+        mezcla += tramo_b[s] * _envolvente(receta["B"].get(s, receta["B"]["otros"]), fraccion)
 
     if "eco" in receta:  # el último beat de A antes del corte se repite, cada vez más bajo
         corte = int(np.interp(receta["eco"], np.linspace(0, 1, BEATS + 1), beats_a))
