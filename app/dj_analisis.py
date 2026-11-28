@@ -488,3 +488,67 @@ def instrumentos_en_comun(a, b, minimo=0.12):
     if not pa or not pb:
         return []
     return [k for k in ("guitarra", "piano", "otros") if pa.get(k, 0) >= minimo and pb.get(k, 0) >= minimo]
+
+
+# ---------- caché en disco de lo caro que se repite (análisis completo y grillas locales) ----------
+# La segunda vez que suena una canción (o que el copiloto la anticipa), su análisis ya está hecho.
+# La clave es una huella del audio, así sirve aunque el archivo cambie de nombre o de carpeta.
+
+import hashlib  # noqa: E402
+import pickle  # noqa: E402
+
+CARPETA_CACHE_DISCO = os.path.join(CARPETA_DATOS, "cache_analisis")
+_MAX_ARCHIVOS_CACHE = 6000
+
+
+def _huella_audio(audio, *extra):
+    muestra = np.ascontiguousarray(audio[::997], dtype=np.float32)
+    h = hashlib.md5(muestra.tobytes())
+    h.update(repr((len(audio),) + tuple(round(float(x), 3) if isinstance(x, float) else x for x in extra)).encode())
+    return h.hexdigest()
+
+
+def _cache_disco(tipo):
+    def decorador(funcion):
+        def envuelta(audio, *args):
+            try:
+                clave = _huella_audio(audio, tipo, *args)
+                ruta = os.path.join(CARPETA_CACHE_DISCO, clave[:2], clave + ".pkl")
+                if os.path.exists(ruta):
+                    with open(ruta, "rb") as f:
+                        return pickle.load(f)
+            except Exception:  # noqa: BLE001
+                ruta = None
+            resultado = funcion(audio, *args)
+            if ruta:
+                try:
+                    os.makedirs(os.path.dirname(ruta), exist_ok=True)
+                    temporal = ruta + ".tmp"
+                    with open(temporal, "wb") as f:
+                        pickle.dump(resultado, f, protocol=pickle.HIGHEST_PROTOCOL)
+                    os.replace(temporal, ruta)
+                except OSError:
+                    pass
+            return resultado
+        envuelta.__wrapped__ = funcion
+        envuelta.__doc__ = funcion.__doc__
+        return envuelta
+    return decorador
+
+
+analisis_completo = _cache_disco("completo")(analisis_completo)
+grilla_local = _cache_disco("grilla")(grilla_local)
+
+
+def limpiar_cache_disco():
+    """Deja como mucho _MAX_ARCHIVOS_CACHE archivos (borra los más viejos). Se llama al abrir."""
+    try:
+        archivos = []
+        for raiz, _c, nombres in os.walk(CARPETA_CACHE_DISCO):
+            archivos += [os.path.join(raiz, n) for n in nombres]
+        if len(archivos) > _MAX_ARCHIVOS_CACHE:
+            archivos.sort(key=os.path.getmtime)
+            for ruta in archivos[:len(archivos) - _MAX_ARCHIVOS_CACHE]:
+                os.remove(ruta)
+    except OSError:
+        pass

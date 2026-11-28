@@ -29,6 +29,18 @@ def _perfil(ruta):
     return ruta, *dj_analisis.perfil_seguro(ruta)
 
 
+def _completo(ruta):
+    """Análisis completo (beats de toda la canción) y la grilla fina de su inicio, a la caché de
+    disco: en la fiesta ninguna canción tiene que analizarse en el momento."""
+    try:
+        audio = dj_analisis.decodificar(ruta)
+        ana = dj_analisis.analisis_completo(audio)
+        dj_analisis.grilla_local(audio, ana["inicio_s"], ana["inicio_s"] + 60.0, ana["bpm"])
+        return ruta, True, None
+    except Exception as error:  # noqa: BLE001
+        return ruta, False, str(error)
+
+
 def _avance(etapa, hechas, total, inicio, errores):
     pasado = time.time() - inicio
     resta = pasado / max(hechas, 1) * (total - hechas)
@@ -79,6 +91,18 @@ def preparar(carpeta, procesos):
                     dj_analisis.guardar_cache()
                     _avance("Instrumentos", hechas, len(faltan), inicio, errores)
     dj_analisis.guardar_cache()
+
+    # 3) análisis completo de cada canción a la caché de disco (lo que se hace al cargarla)
+    hechas, errores, inicio = 0, 0, time.time()
+    validas = [r for r in rutas if (dj_analisis.en_cache(r) or {}).get("bpm")]
+    print(f"Análisis completo de {len(validas)} canciones…", flush=True)
+    with ProcessPoolExecutor(max_workers=procesos) as pool:
+        for futuro in as_completed([pool.submit(_completo, r) for r in validas]):
+            _ruta, ok, _error = futuro.result()
+            hechas += 1
+            errores += not ok
+            if hechas % 25 == 0 or hechas == len(validas):
+                _avance("Completo", hechas, len(validas), inicio, errores)
     listas = sum(1 for r in rutas if (dj_analisis.en_cache(r) or {}).get("instrumentos"))
     print(f"Listo: {listas} de {len(rutas)} canciones con todo preparado.", flush=True)
 

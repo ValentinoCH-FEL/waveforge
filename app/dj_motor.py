@@ -200,6 +200,16 @@ RECETAS_LIGERAS = ("mezcla_larga", "cambio_de_bajo", "eco")
 
 
 def separar_tramo(audio, ligero=False):
+    """Separa con la IA en el proceso trabajador (ver dj_trabajador): no traba la ventana ni el audio."""
+    if ligero:
+        return separar_ligero(audio)
+    if separador.falta_instalar():
+        raise ErrorMezcla("La separación con IA no está instalada.")
+    import dj_trabajador
+    return dj_trabajador.separar(audio)
+
+
+def separar_local(audio, ligero=False):
     """audio: [n, 2]. Devuelve {voz, bateria, bajo, otros: [n, 2]} con Demucs. "otros" es todo lo
     que no es voz, batería ni bajo, así las cuatro pistas suman exactamente el audio original."""
     if ligero:

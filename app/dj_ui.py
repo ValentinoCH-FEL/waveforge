@@ -289,11 +289,13 @@ class PestanaDJ(ttk.Frame):
         self.sesion.pedir(indice=indice)
         c = self.sesion.biblioteca[indice]
         self.etiqueta_voto.config(text=f"Preparando la mezcla con «{c['titulo']}»…")
-        self._recos_mostradas = None  # se redibuja con la elegida marcada
+        self.etiqueta_siguiente.config(text=c["titulo"])
+        self._recos_mostradas = None  # se redibuja ya, con la elegida marcada
+        self._actualizar_copiloto()
 
     def _cambiar_en(self, segundo):
         self.sesion.pedir(indice=self._elegida, entrar_s=segundo)
-        self.etiqueta_voto.config(text=f"El cambio se hará en {_tiempo(segundo)} (inicio de frase más cercano).")
+        self.etiqueta_voto.config(text=f"✔ El cambio se hará en {_tiempo(segundo)} (inicio de frase más cercano).")
 
     def _limpiar_copiloto(self):
         for marco in (self.marco_recos, self.marco_puntos):
@@ -338,10 +340,19 @@ class PestanaDJ(ttk.Frame):
                 tk.Label(self.marco_puntos, text="Ya no hay tiempo de preparar otro punto: cambia al final.",
                          bg=tema.FONDO, fg=tema.TEXTO_SUAVE, anchor="w").pack(fill="x")
             for p in puntos:
-                BotonAnimado(self.marco_puntos, f"{_tiempo(p['segundo'])}  ·  {p['motivo']}",
-                             lambda s=p["segundo"]: self._cambiar_en(s), alto=26, estilo="suave",
-                             ayuda="La mezcla empieza en el inicio de frase más cercano a este punto").pack(
-                    fill="x", pady=1)
+                fila = tk.Frame(self.marco_puntos, bg=tema.PANEL_2, cursor="hand2")
+                fila.pack(fill="x", pady=1)
+                hora = tk.Label(fila, text=_tiempo(p["segundo"]), bg=tema.PANEL_2, fg=tema.AZUL, width=6,
+                                anchor="w", font=("Consolas", 10, "bold"))
+                hora.pack(side="left", padx=(6, 2), pady=3)
+                motivo = tk.Label(fila, text=p["motivo"], bg=tema.PANEL_2, fg=tema.TEXTO, anchor="w",
+                                  justify="left", wraplength=360, font=("TkDefaultFont", 8))
+                motivo.pack(side="left", fill="x", expand=True, pady=3)
+                for w in (fila, hora, motivo):
+                    w.bind("<Button-1>", lambda e, s=p["segundo"]: self._cambiar_en(s))
+                    w.bind("<Enter>", lambda e, f=fila: [x.config(bg=tema.AZUL_OSCURO if hasattr(tema, "AZUL_OSCURO") else tema.PANEL)
+                                                         for x in [f] + f.winfo_children()])
+                    w.bind("<Leave>", lambda e, f=fila: [x.config(bg=tema.PANEL_2) for x in [f] + f.winfo_children()])
 
     # ---------- biblioteca ----------
 

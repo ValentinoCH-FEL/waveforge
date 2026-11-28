@@ -453,6 +453,9 @@ class SesionDJ:
         if not self.biblioteca:
             raise RuntimeError("Primero elige una carpeta o USB con música.")
         self._parar = threading.Event()
+        if self.equipo.get("separar_con_ia", True):
+            import dj_trabajador
+            dj_trabajador.precargar()  # la IA se carga en su propio proceso mientras empieza a sonar
         self._sonadas = set()
         self._bloque, self._bloque_inicio, self._bloque_canciones = 0, time.time(), 0
         self._bloque_de = {}
@@ -572,6 +575,7 @@ class SesionDJ:
                 time.sleep(0.3)
             self._pedido = None
             indice, audio_a, ana_a, tramo_a = tramo_b["indice"], tramo_b["audio"], tramo_b["analisis"], tramo_b
+            self.siguiente, self.mensaje = None, ""  # ya sonó: lo de la mezcla anterior no sigue en pantalla
         self.siguiente = None
         if not parar.is_set():
             self.mensaje = "No quedan más canciones para mezclar."
@@ -714,13 +718,16 @@ class SesionDJ:
         ruta = self.biblioteca[indice]["ruta"]
         letra, escuchada = self._letra.get(ruta, []), self._letra_hasta.get(ruta, 0.0)
 
+        arreglos = dj_letra._arreglos(letra)
+
         def sobre_la_letra(t):
             """None si esa parte aún no se escuchó; si no, (corta_la_letra, termina_un_verso)."""
             a, b = t + 0.2 * largo, t + 0.55 * largo
             if b > escuchada:
                 return None
-            fin = next((t + x * largo for x in (0.2, 0.3, 0.4) if dj_letra.fin_de_verso(letra, t + x * largo)), None)
-            return dj_letra.cantando(letra, a, b) > 0.35 and fin is None, fin
+            fin = next((t + x * largo for x in (0.2, 0.3, 0.4)
+                        if dj_letra.fin_de_verso(letra, t + x * largo, arreglos=arreglos)), None)
+            return dj_letra.cantando(letra, a, b, arreglos=arreglos) > 0.35 and fin is None, fin
 
         frases = [t for t in frases if not (sobre_la_letra(t) or (False,))[0]]
         if not frases:
@@ -733,7 +740,7 @@ class SesionDJ:
             ultimas = dj_letra.ultimas_palabras(letra, info[1])
             return f" · termina un verso: «…{ultimas}»" if ultimas else " · la voz descansa"
 
-        if self._energia_actual[0] is not id(tramo):  # una vez por canción, no en cada refresco
+        if self._energia_actual[0] != id(tramo):  # una vez por canción, no en cada refresco
             n = len(audio) // (SR // 2)
             bloques = np.square(audio[:n * (SR // 2)], dtype=np.float32).mean(axis=1).reshape(n, SR // 2)
             self._energia_actual = (id(tramo), np.sqrt(bloques.mean(axis=1)) + 1e-9)
