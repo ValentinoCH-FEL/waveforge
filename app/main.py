@@ -478,4 +478,6 @@ def main():
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()  # la preparación del USB usa varios procesos (y el .exe los necesita así)
     main()

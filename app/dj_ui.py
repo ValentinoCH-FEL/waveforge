@@ -82,6 +82,17 @@ class PestanaDJ(ttk.Frame):
                                       ayuda="Cargar la música del USB conectado")
         self._unidad_usb = None
 
+        # --- lo simple: elegir el género y que suene ---
+        fiesta = ttk.LabelFrame(izquierda, text="¿Qué quieres escuchar?")
+        fiesta.pack(fill="x", padx=10, pady=(0, 8))
+        self.fila_generos = tk.Frame(fiesta, bg=tema.FONDO)
+        self.fila_generos.pack(fill="x", padx=8, pady=(8, 4))
+        self.etiqueta_preparacion = ttk.Label(fiesta, text="Conecta un USB con música (o elige una carpeta).",
+                                              foreground=tema.TEXTO_SUAVE)
+        self.etiqueta_preparacion.pack(anchor="w", padx=8, pady=(0, 8))
+        self._fiesta_pendiente = None   # género elegido que espera tener canciones listas para empezar
+        self._valores_mostrados = {}    # índice -> valores que muestra la tabla (para no redibujar de más)
+
         # --- plan de la sesión: qué géneros, cuánto tiempo y en qué orden ---
         plan = ttk.LabelFrame(izquierda, text="Plan de la sesión")
         plan.pack(fill="x", padx=10, pady=(0, 8))
@@ -207,7 +218,7 @@ class PestanaDJ(ttk.Frame):
         tk.Label(caja, bg=tema.FONDO, fg=tema.TEXTO_SUAVE, anchor="w", justify="left", wraplength=400,
                  font=("TkDefaultFont", 8),
                  text="La IA separa solo los segundos de cada mezcla, mientras suena la canción anterior, y cada "
-                      "canción se descarta de la memoria al terminar. Las canciones con tempos a más de ±10 % "
+                      "canción se descarta de la memoria al terminar. Las canciones con tempos a más de ±8 % "
                       "se unen con un corte con eco.").pack(side="bottom", fill="x")
 
     # ---------- biblioteca ----------
@@ -225,6 +236,8 @@ class PestanaDJ(ttk.Frame):
         for i, cancion in enumerate(self.sesion.biblioteca):
             self._filas[i] = self.tabla.insert("", "end", values=self._valores(cancion))
         generos = self.sesion.generos()
+        self._armar_botones_genero(generos)
+        self._valores_mostrados = {}
         self.combo_genero.config(values=[VARIADO] + [f"{g}  ({n})" for g, n in generos.items()])
         self.var_genero.set(VARIADO)
         self._reiniciar_plan()
@@ -268,6 +281,61 @@ class PestanaDJ(ttk.Frame):
         self.sesion.plan = [{"genero": None, "limite": None}]
         self._plan_inicial = True
         self._mostrar_plan()
+
+    # ---------- lo simple: un botón por género ----------
+
+    MINIMO_PARA_EMPEZAR = 6  # canciones preparadas del género para arrancar sin esperar al resto
+
+    def _armar_botones_genero(self, generos):
+        for hijo in self.fila_generos.winfo_children():
+            hijo.destroy()
+        BotonAnimado(self.fila_generos, "🎉  Todo variado", lambda: self._fiesta(None), estilo="acento", alto=40,
+                     ayuda="El DJ mezcla de todo y cambia de género cada tanto").pack(side="left", padx=(0, 8))
+        for genero, cantidad in generos.items():
+            BotonAnimado(self.fila_generos, f"🎵  {genero}", lambda g=genero: self._fiesta(g), alto=40,
+                         ayuda=f"{cantidad} canciones de {genero}").pack(side="left", padx=(0, 8))
+
+    def _fiesta(self, genero):
+        """Un clic y suena: el DJ mezcla ese género (o variado) sin límite de tiempo."""
+        if not self.sesion.biblioteca:
+            messagebox.showinfo("Modo DJ", "Conecta un USB con música o elige una carpeta.")
+            return
+        self.sesion.detener()
+        self.sesion.genero_prioridad = genero          # se prepara primero lo que se va a escuchar
+        self.sesion.plan = [{"genero": genero, "limite": None}]
+        self._plan_inicial = genero is None
+        self._mostrar_plan()
+        self.tabla.selection_remove(*self.tabla.selection())
+        self._fiesta_pendiente = genero if genero is not None else VARIADO
+        self._intentar_fiesta()
+
+    def _intentar_fiesta(self):
+        if self._fiesta_pendiente is None:
+            return
+        genero = None if self._fiesta_pendiente == VARIADO else self._fiesta_pendiente
+        if self.sesion.listas_del_genero(genero) >= min(self.MINIMO_PARA_EMPEZAR,
+                                                        self.sesion.generos().get(genero, 10 ** 6)):
+            self._fiesta_pendiente = None
+            self._empezar()
+
+    def _mostrar_preparacion(self):
+        total = len(self.sesion.biblioteca)
+        if not total:
+            return
+        hechas = self.sesion.preparadas()
+        equipo = self.sesion.equipo
+        modo = "mezclas con IA" if equipo.get("separar_con_ia", True) else "mezclas por ecualizador (equipo modesto)"
+        if hechas >= total:
+            texto = f"✔ Tu música está lista: {self.sesion.analizadas()} canciones · {modo}"
+        else:
+            falta = self.sesion.segundos_restantes()
+            estimado = f" · quedan ~{max(1, round(falta / 60))} min" if falta else ""
+            texto = (f"Preparando tu música… {100 * hechas // total} %{estimado} · "
+                     f"{equipo.get('procesos', 1)} procesos en paralelo")
+        if self._fiesta_pendiente is not None:
+            texto = f"Preparando {self._fiesta_pendiente}: empieza en cuanto haya canciones listas…   " + texto
+        if self.etiqueta_preparacion.cget("text") != texto:
+            self.etiqueta_preparacion.config(text=texto)
 
     # ---------- estilo aprendido ----------
 
@@ -338,6 +406,8 @@ class PestanaDJ(ttk.Frame):
             if unidad:
                 self.boton_usb.cambiar_texto(f"🔌  Usar USB ({unidad[:2]})")
                 self.boton_usb.pack(side="left", padx=(8, 0), before=self.etiqueta_biblioteca)
+                if not self.sesion.biblioteca and not self.sesion.activa:
+                    self.abrir_carpeta(unidad)  # se prepara solo: el usuario no tiene que hacer nada
             else:
                 self.boton_usb.pack_forget()
 
@@ -348,13 +418,14 @@ class PestanaDJ(ttk.Frame):
     def _actualizar_biblioteca(self):
         biblioteca = self.sesion.biblioteca
         for i, fila in self._filas.items():
-            if i < len(biblioteca) and self.tabla.exists(fila):
-                cancion = biblioteca[i]
-                valores = self._valores(cancion)
-                if tuple(self.tabla.item(fila, "values")) != tuple(str(v) for v in valores):
-                    self.tabla.item(fila, values=valores)
-                etiquetas = ("error",) if cancion["error"] else (("sonando",) if i == self._ultimo_indice else ())
-                self.tabla.item(fila, tags=etiquetas)
+            if i >= len(biblioteca):
+                continue
+            cancion = biblioteca[i]
+            etiquetas = ("error",) if cancion["error"] else (("sonando",) if i == self._ultimo_indice else ())
+            clave = (tuple(self._valores(cancion)), etiquetas)
+            if self._valores_mostrados.get(i) != clave and self.tabla.exists(fila):
+                self.tabla.item(fila, values=clave[0], tags=etiquetas)
+                self._valores_mostrados[i] = clave
         if biblioteca:
             hechas = self.sesion.analizadas()
             texto = (f"{len(biblioteca)} canciones" if hechas >= len(biblioteca)
@@ -457,8 +528,11 @@ class PestanaDJ(ttk.Frame):
         self.etiqueta_mensaje.config(text=e.get("mensaje") or "")
         self.boton_bien.habilitar(bool(e.get("puede_votar")))
         self.boton_mal.habilitar(bool(e.get("puede_votar")))
-        self._actualizar_biblioteca()
         self._cuadros = getattr(self, "_cuadros", 0) + 1
+        if self._cuadros % 10 == 1:  # una vez por segundo: tabla, preparación y ¿ya puede empezar?
+            self._actualizar_biblioteca()
+            self._mostrar_preparacion()
+            self._intentar_fiesta()
         if self._cuadros % 30 == 1:  # cada 3 s: ¿se conectó o se sacó un USB?
             self._buscar_usb()
         self.after(MS_CUADRO, self._tick)

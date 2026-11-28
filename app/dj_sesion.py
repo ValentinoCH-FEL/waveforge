@@ -19,6 +19,7 @@ import time
 import numpy as np
 
 import dj_analisis
+import dj_equipo
 import dj_juez
 import dj_motor
 from dj_analisis import SR
@@ -79,6 +80,12 @@ class SesionDJ:
         self._bloque_canciones = 0
         self._racha = 0               # modo variado: canciones seguidas del mismo género...
         self._racha_objetivo = 4      # ...y cuántas se quiere antes de cambiar
+        self.genero_prioridad = None  # el género que el usuario eligió: se prepara primero
+        # el equipo del cliente: sin medir todavía se asume uno modesto; la medición real se hace
+        # en segundo plano la primera vez y queda guardada
+        self.equipo = dj_equipo.perfil(medir=False)
+        if self.equipo.get("segundos_por_segundo") is None:
+            threading.Thread(target=self._medir_equipo, daemon=True).start()
 
     # ---------- biblioteca ----------
 
@@ -134,24 +141,75 @@ class SesionDJ:
                 cancion["error"] = str(error)
 
     def _analizar_biblioteca(self, generacion):
-        nuevas = 0
-        for i, cancion in enumerate(self.biblioteca):
-            if generacion != self._generacion:
-                return
-            if cancion["bpm"] is None and cancion["error"] is None:
-                self._analizar_una(cancion)
-                nuevas += 1
-                if nuevas % 10 == 0:
-                    dj_analisis.guardar_cache()
+        """Prepara la música en segundo plano, apenas se conecta el USB: varios procesos a la vez
+        (según el equipo del cliente) y primero el género que se eligió, así la fiesta puede
+        empezar sin esperar a que esté todo. Mientras se arma una mezcla, cede el procesador."""
+        from concurrent.futures import ProcessPoolExecutor, wait
+
+        self.preparacion = {"inicio": time.time(), "hechas": 0}
+        procesos = max(1, int(self.equipo.get("procesos", 1)))
+        try:
+            pool = ProcessPoolExecutor(max_workers=procesos) if procesos > 1 else None
+        except Exception:  # noqa: BLE001
+            pool = None
+        try:
+            while generacion == self._generacion:
+                pendientes = [c for c in self.biblioteca if c["bpm"] is None and c["error"] is None]
+                if not pendientes:
+                    break
+                while self.mensaje.startswith("Preparando") and generacion == self._generacion:
+                    time.sleep(0.5)
+                # primero el género elegido (puede cambiar mientras tanto: se mira en cada tanda)
+                pendientes.sort(key=lambda c: c["genero"] != self.genero_prioridad)
+                tanda = pendientes[:procesos * 2]
+                if pool is None:
+                    for cancion in tanda:
+                        self._analizar_una(cancion)
+                else:
+                    futuros = {pool.submit(dj_analisis.analizar_seguro, c["ruta"]): c for c in tanda}
+                    wait(futuros)
+                    for futuro, cancion in futuros.items():
+                        datos, error = futuro.result()
+                        if datos:
+                            dj_analisis.recordar(cancion["ruta"], datos)
+                            self._aplicar(cancion, datos)
+                        else:
+                            cancion["error"] = error
+                self.preparacion["hechas"] += len(tanda)
+                dj_analisis.guardar_cache()
                 self._al_evento("biblioteca", "")
-            # mientras se prepara una mezcla, el análisis de fondo le deja el procesador
-            while self.mensaje.startswith("Preparando") and generacion == self._generacion:
-                time.sleep(0.5)
+        finally:
+            if pool is not None:
+                pool.shutdown(wait=False, cancel_futures=True)
         dj_analisis.guardar_cache()
-        self._al_evento("biblioteca", "lista")
+        if generacion == self._generacion:
+            self._al_evento("biblioteca", "lista")
 
     def analizadas(self):
         return sum(1 for c in self.biblioteca if c["bpm"] is not None)
+
+    def preparadas(self):
+        """Canciones ya revisadas (analizadas o descartadas por estar dañadas)."""
+        return sum(1 for c in self.biblioteca if c["bpm"] is not None or c["error"] is not None)
+
+    def listas_del_genero(self, genero):
+        return sum(1 for c in self.biblioteca if c["bpm"] is not None and (genero is None or c["genero"] == genero))
+
+    def segundos_restantes(self):
+        """Estimación de lo que falta para tener todo el USB preparado (None si aún no se sabe)."""
+        p = getattr(self, "preparacion", None)
+        faltan = len(self.biblioteca) - self.preparadas()
+        if not p or p["hechas"] < 4 or faltan <= 0:
+            return None if faltan > 0 else 0
+        return faltan * (time.time() - p["inicio"]) / p["hechas"]
+
+    def _medir_equipo(self):
+        """Mide una vez cuánto tarda este equipo en separar pistas (se guarda para las próximas)."""
+        try:
+            self.equipo = dj_equipo.perfil()
+            self._al_evento("equipo", self.equipo.get("detalle", ""))
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---------- elegir la siguiente ----------
 
@@ -373,7 +431,12 @@ class SesionDJ:
                     caracteristicas = next(c for o, c in opciones if o is ini_b)
                 except Exception:  # noqa: BLE001
                     fin_a, ini_b = dj_motor.afinar(audio_a, ana_a, audio_b, ana_b, salir_s)
+                ligero = not self.equipo.get("separar_con_ia", True)  # equipo modesto: sin IA de separación
+                if ligero:
+                    pesos = {r: (pesos.get(r, 0.5) if r in dj_motor.RECETAS_LIGERAS else 0.0)
+                             for r in dj_motor.SINCRONIZADAS}
                 plan = dj_motor.planear(fin_a, ini_b, self._rng, pesos, beats=beats, salir_s=salir_s)
+                plan["ligero"] = ligero
                 resultado = dj_motor.preparar(audio_a, fin_a, audio_b, ini_b, plan, cancelado=parar.is_set)
                 if resultado is None:
                     return None
@@ -474,8 +537,19 @@ class SesionDJ:
         if caracteristicas:  # el voto se vuelve un ejemplo para reentrenar al juez
             import dj_entrenar
             dj_entrenar.guardar_voto(caracteristicas, cancion_b, voto)
+            if len(dj_entrenar.leer_votos()) % 10 == 0:  # cada 10 votos aprende tu gusto (en segundo plano)
+                threading.Thread(target=self._reentrenar_juez, daemon=True).start()
         self._ultima_mezcla = None  # un voto por transición
         return f"{registro['a']} → {registro['b']}"
+
+    @staticmethod
+    def _reentrenar_juez():
+        try:
+            from threadpoolctl import threadpool_limits
+            with threadpool_limits(limits=1):
+                dj_juez.entrenar(dj_juez.rutas_ejemplos(), dj_juez.votos_guardados())
+        except Exception:  # noqa: BLE001
+            pass
 
     def estado(self):
         """Foto para la interfaz: qué suena, por dónde va y qué viene."""

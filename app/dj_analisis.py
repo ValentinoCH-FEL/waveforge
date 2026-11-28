@@ -360,3 +360,18 @@ def analisis_completo(audio):
 
     return {"bpm": float(bpm), "beats": np.asarray(beats, dtype=np.float64), "fase": fase,
             "inicio_s": inicio_s, "fin_s": fin_s, "estable": estable}
+
+
+# ---------- para preparar el USB en varios procesos ----------
+
+def analizar_seguro(ruta):
+    """Lo que corre cada proceso al preparar el USB: (datos, None) o (None, mensaje de error)."""
+    try:
+        return analisis_rapido(ruta), None
+    except Exception as error:  # noqa: BLE001
+        return None, str(error)
+
+
+def recordar(ruta, datos):
+    """Guarda en la caché lo que analizó otro proceso (cada proceso tiene su propia memoria)."""
+    _leer_cache()[_clave(ruta)] = datos
