@@ -93,6 +93,7 @@ class SesionDJ:
         self._racha = 0               # modo variado: canciones seguidas del mismo género...
         self._racha_objetivo = 4      # ...y cuántas se quiere antes de cambiar
         self.genero_prioridad = None  # el género que el usuario eligió: se prepara primero
+        self.profunda = None          # avance de la huella de instrumentos {total, hechas}
         self._pedido = None           # copiloto: {indice, entrar_s} que eligió el DJ
         self._actual = None           # (indice, audio, análisis, tramo) de la canción que suena
         # copiloto sin espera: ruta -> {audio, analisis, regiones: [(desde, hasta, pistas)]} que se
@@ -143,7 +144,7 @@ class SesionDJ:
     @staticmethod
     def _aplicar(cancion, datos):
         """Pasa a la canción lo que dio el análisis (y las etiquetas del archivo, donde falte algo)."""
-        for clave in ("bpm", "tono", "camelot", "energia", "dur", "patron", "timbre"):
+        for clave in ("bpm", "tono", "camelot", "energia", "dur", "patron", "timbre", "instrumentos"):
             cancion[clave] = datos.get(clave)
         # El nombre del archivo («Artista - Título.mp3») manda: las etiquetas internas de los MP3
         # suelen venir mal (otro artista, «lyrics», «Official Music Video»). Solo se usan si el
@@ -214,6 +215,50 @@ class SesionDJ:
         self._escala_timbre = None  # con toda la biblioteca analizada, la escala es más fiel
         if generacion == self._generacion:
             self._al_evento("biblioteca", "lista")
+            self._preparacion_profunda(generacion)
+
+    def _preparacion_profunda(self, generacion):
+        """La huella de instrumentos de cada canción (la IA separa 20 s de cada una). Es lenta, así
+        que va después de todo, con pocos procesos, y se pausa mientras suena la fiesta: el
+        copiloto también usa la IA y la mezcla tiene prioridad."""
+        from concurrent.futures import ProcessPoolExecutor, wait
+
+        if not self.equipo.get("separar_con_ia", True):
+            return  # en equipos modestos llevaría horas: el copiloto funciona igual sin ella
+        faltan = [c for c in self.biblioteca if c["bpm"] is not None and not c.get("instrumentos")]
+        if not faltan:
+            return
+        procesos = max(1, min(3, int(self.equipo.get("nucleos", 2)) // 2))
+        self.profunda = {"total": len(faltan), "hechas": 0}
+        try:
+            pool = ProcessPoolExecutor(max_workers=procesos)
+        except Exception:  # noqa: BLE001
+            return
+        try:
+            faltan.sort(key=lambda c: c["genero"] != self.genero_prioridad)
+            for k in range(0, len(faltan), procesos):
+                while self.activa and generacion == self._generacion:
+                    time.sleep(1.0)
+                if generacion != self._generacion:
+                    return
+                tanda = faltan[k:k + procesos]
+                futuros = {pool.submit(dj_analisis.perfil_seguro, c["ruta"]): c for c in tanda}
+                wait(futuros)
+                cache = dj_analisis._leer_cache()
+                for futuro, cancion in futuros.items():
+                    perfil, _error = futuro.result()
+                    if perfil:
+                        cancion["instrumentos"] = perfil
+                        guardado = cache.get(dj_analisis._clave(cancion["ruta"]))
+                        if guardado is not None:
+                            guardado["instrumentos"] = perfil
+                self.profunda["hechas"] += len(tanda)
+                if self.profunda["hechas"] % (procesos * 5) == 0:
+                    dj_analisis.guardar_cache()
+                self._al_evento("biblioteca", "")
+        finally:
+            dj_analisis.guardar_cache()
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def analizadas(self):
         return sum(1 for c in self.biblioteca if c["bpm"] is not None)
@@ -333,6 +378,13 @@ class SesionDJ:
                 puntaje += 3.0 * (parecido - 0.5)                                       # batería parecida
                 if parecido >= 0.6:
                     razones.append(f"batería {100 * parecido:.0f} % parecida: buena para mezclar por la batería")
+            if c["genero"] == cancion_actual["genero"]:
+                puntaje += 1.5                                                          # mismo género: la pista sigue
+            comunes = dj_analisis.instrumentos_en_comun(cancion_actual, c)
+            if comunes:
+                puntaje += 0.4 * len(comunes)                                           # instrumentos en común
+                nombres = " y ".join(dj_analisis.NOMBRE_INSTRUMENTO[k] for k in comunes)
+                razones.append(f"comparten {nombres}: buena para un puente de instrumento")
             if cancion_actual["energia"] is not None and c["energia"] is not None:
                 delta = c["energia"] - cancion_actual["energia"]
                 puntaje -= 0.06 * abs(delta)                                            # energía parecida

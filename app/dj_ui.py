@@ -448,6 +448,10 @@ class PestanaDJ(ttk.Frame):
         modo = "mezclas con IA" if equipo.get("separar_con_ia", True) else "mezclas por ecualizador (equipo modesto)"
         if hechas >= total:
             texto = f"   ✔ Tu música está lista: {self.sesion.analizadas()} canciones · {modo}"
+            prof = self.sesion.profunda
+            if prof and prof["hechas"] < prof["total"]:
+                texto += (f" · instrumentos {100 * prof['hechas'] // prof['total']} %"
+                          + (" (en pausa mientras suena)" if self.sesion.activa else ""))
         else:
             falta = self.sesion.segundos_restantes()
             estimado = f" · quedan ~{max(1, round(falta / 60))} min" if falta else ""

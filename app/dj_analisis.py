@@ -436,3 +436,55 @@ def analizar_seguro(ruta):
 def recordar(ruta, datos):
     """Guarda en la caché lo que analizó otro proceso (cada proceso tiene su propia memoria)."""
     _leer_cache()[_clave(ruta)] = datos
+
+
+# ---------- huella de instrumentos: «¿qué tiene esta canción?» (preparación profunda) ----------
+
+INSTRUMENTOS = ("voz", "bateria", "bajo", "guitarra", "piano", "otros")  # «otros»: metales y demás
+NOMBRE_INSTRUMENTO = {"voz": "voz", "bateria": "batería", "bajo": "bajo", "guitarra": "guitarra",
+                      "piano": "piano", "otros": "metales"}
+SEGUNDOS_PERFIL = 20.0
+
+
+def perfil_instrumentos(ruta, dur=None):
+    """Qué parte del sonido es de cada instrumento, en 20 s del centro de la canción, separados con
+    la IA (Demucs, 6 pistas). {voz: 0.31, bateria: 0.18, ...} (suman 1). Es lo más lento del
+    análisis (~15 s por canción): se hace una vez, en segundo plano, y se guarda."""
+    import separador
+
+    if dur is None:
+        dur = metadatos(ruta)["dur"] or 120.0
+    desde = max(0.0, dur / 2.0 - SEGUNDOS_PERFIL / 2.0)
+    crudo = _ffmpeg(["-ss", str(desde), "-i", ruta, "-vn", "-t", str(SEGUNDOS_PERFIL), "-f", "f32le",
+                     "-ac", "2", "-ar", str(SR), "-"])
+    audio = np.frombuffer(crudo, dtype=np.float32).reshape(-1, 2)
+    if len(audio) < SR * 5:
+        raise ErrorAnalisis("Muy poco audio para medir los instrumentos.")
+    with separador._candado_modelos:
+        partes = separador._separar_demucs(np.ascontiguousarray(audio.T), SR)
+    energia = {k: float(np.mean(np.square(partes[k], dtype=np.float64))) if k in partes else 0.0
+               for k in INSTRUMENTOS if k != "otros"}
+    resto = audio.T - sum(partes[k] for k in partes if k in energia)
+    energia["otros"] = float(np.mean(np.square(resto, dtype=np.float64)))
+    total = sum(energia.values()) + 1e-12
+    return {k: round(energia[k] / total, 3) for k in INSTRUMENTOS}
+
+
+def perfil_seguro(ruta):
+    """Para preparar en varios procesos: (perfil, None) o (None, error). Cada proceso usa pocos
+    hilos, así varios procesos se reparten el procesador sin pisarse."""
+    try:
+        import torch
+        torch.set_num_threads(2)
+        datos = en_cache(ruta) or {}
+        return perfil_instrumentos(ruta, datos.get("dur")), None
+    except Exception as error:  # noqa: BLE001
+        return None, str(error)
+
+
+def instrumentos_en_comun(a, b, minimo=0.12):
+    """Instrumentos melódicos fuertes en las dos canciones (guitarra, piano, metales)."""
+    pa, pb = (a or {}).get("instrumentos"), (b or {}).get("instrumentos")
+    if not pa or not pb:
+        return []
+    return [k for k in ("guitarra", "piano", "otros") if pa.get(k, 0) >= minimo and pb.get(k, 0) >= minimo]
