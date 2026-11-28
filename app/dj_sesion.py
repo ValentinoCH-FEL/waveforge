@@ -101,6 +101,9 @@ class SesionDJ:
         self._anticipado = {}
         self._tiempo_preparar = 70.0  # segundos que tarda una mezcla sin nada anticipado (se mide)
         self._anticipando = False
+        self._cache_recos = (None, None)   # (clave, lista): las recomendaciones cambian poco
+        self._ya = None                    # tramo de B puesto por «Mezclar ya» (el bucle lo adopta)
+        self._energia_actual = (None, None)  # (id del tramo, RMS cada 0,5 s): para los puntos de cambio
         self.salida_publico = None      # id de la salida de audio para el público (None = la del sistema)
         self.salida_auriculares = None  # id de la salida para pre-escuchar la mezcla (None = sin pre-escucha)
         self._letra = {}              # ruta -> [(inicio_s, fin_s, palabra)] de la voz (Whisper)
@@ -416,7 +419,12 @@ class SesionDJ:
         genero = self._genero_del_plan()
         if genero is not None:
             pendientes = [i for i in pendientes if self.biblioteca[i]["genero"] == genero] or pendientes
-        return self._puntuar(indice, bpm, pendientes)[:cuantas]
+        clave = (indice, len(self._sonadas), genero, self.analizadas())
+        if self._cache_recos[0] == clave:
+            return self._cache_recos[1][:cuantas]
+        lista = self._puntuar(indice, bpm, pendientes)[:max(cuantas, 5)]
+        self._cache_recos = (clave, lista)
+        return lista[:cuantas]
 
     def _anotar_eleccion(self, anterior, nueva):
         """Lleva la cuenta del bloque y de la racha de género tras elegir una canción."""
@@ -524,12 +532,16 @@ class SesionDJ:
             threading.Thread(target=self._anticipar, args=(tramo_a, parar), daemon=True).start()
             # primero se anticipa (recomendadas y puntos); la mezcla automática espera, salvo que
             # se acerque el final de la canción o el DJ elija algo
-            while (self._anticipando and not parar.is_set() and self._pedido is None and
+            while (self._anticipando and not parar.is_set() and self._pedido is None and self._ya is None and
                    (tramo_a["fin"] - tramo_a["pos"]) / SR > self._tiempo_preparar + 45.0):
                 time.sleep(0.5)
             tramo_b = None
-            if self._pedido is None:
+            if self._ya is not None:  # «Mezclar ya» antes de que empezara la automática
+                tramo_b, self._ya = self._ya, None
+            elif self._pedido is None:
                 tramo_b = self._preparar_siguiente(indice, audio_a, ana_a, tramo_a, parar)
+                if self._ya is not None:  # «Mezclar ya» mientras se preparaba: manda lo del DJ
+                    tramo_b, self._ya = self._ya, None
             if tramo_b is None and self._pedido and not parar.is_set():
                 # el DJ eligió mientras se preparaba la automática: se atiende ya su pedido
                 pedido, self._pedido = self._pedido, None
@@ -544,6 +556,9 @@ class SesionDJ:
                     actual = self._tramos[0] if self._tramos else None
                 if actual is tramo_b or actual is None:
                     break
+                if self._ya is not None:  # «Mezclar ya» puso otra canción en cola: esa es la que sigue
+                    tramo_b, self._ya, self._pedido = self._ya, None, None
+                    continue
                 pedido, self._pedido = self._pedido, None
                 if pedido and actual is tramo_a:
                     anterior = tramo_b["indice"]
@@ -570,6 +585,11 @@ class SesionDJ:
         if not self.equipo.get("separar_con_ia", True):
             self._anticipando = False
             return  # en modo ligero separar es instantáneo: no hace falta anticipar
+        try:  # la IA de fondo deja procesador libre para el audio y la pantalla
+            import torch
+            torch.set_num_threads(max(1, int(self.equipo.get("nucleos", 4)) - 2))
+        except Exception:  # noqa: BLE001
+            pass
 
         def sigue():
             return not parar.is_set() and self._actual is not None and self._actual[3] is tramo_a
@@ -621,6 +641,9 @@ class SesionDJ:
             fin_musica = int(ana_a["fin_s"] * SR)
             while sigue():
                 ahora = tramo_a["pos"]
+                if region is not None and region[1] > ahora + 90 * SR:
+                    time.sleep(1.0)  # ya va 90 s por delante: no hace falta más (menos carga)
+                    continue
                 if region is None or region[1] < ahora + 20 * SR:
                     region = None
                     desde = min(ahora + 20 * SR, fin_musica)
@@ -710,10 +733,15 @@ class SesionDJ:
             ultimas = dj_letra.ultimas_palabras(letra, info[1])
             return f" · termina un verso: «…{ultimas}»" if ultimas else " · la voz descansa"
 
-        mono = audio.mean(axis=1)
+        if self._energia_actual[0] is not id(tramo):  # una vez por canción, no en cada refresco
+            n = len(audio) // (SR // 2)
+            bloques = np.square(audio[:n * (SR // 2)], dtype=np.float32).mean(axis=1).reshape(n, SR // 2)
+            self._energia_actual = (id(tramo), np.sqrt(bloques.mean(axis=1)) + 1e-9)
+        rms = self._energia_actual[1]
+        ventana = max(1, int(8 * 60.0 / ana["bpm"] * 2))
         def energia(t):
-            a, b = int(t * SR), int((t + 8 * 60.0 / ana["bpm"]) * SR)
-            return float(np.sqrt(np.mean(np.square(mono[a:b], dtype=np.float64))) + 1e-9)
+            k = int(t * 2)
+            return float(rms[k:k + ventana].mean()) if k < len(rms) else 1e-9
         media = float(np.median([energia(t) for t in frases]))
         puntos = [{"segundo": frases[0], "motivo": "el más cercano (inicio de frase)" + detalle(frases[0])}]
         respiro = min(frases[1:-1] or frases, key=energia)
@@ -764,7 +792,16 @@ class SesionDJ:
                 except Exception:  # noqa: BLE001
                     fin_a, ini_b = dj_motor.afinar(audio_a, ana_a, audio_b, ana_b, salir_s)
                 ligero = not self.equipo.get("separar_con_ia", True)  # equipo modesto: sin IA de separación
+                regiones_a = self._anticipado.get(self.biblioteca[indice]["ruta"], {}).get("regiones")
+                regiones_b = self._anticipado.get(cancion_b["ruta"], {}).get("regiones")
+                if entrar_s is not None and not (regiones_a and regiones_b):
+                    # el DJ eligió un punto cercano y lo lento no está hecho: mezcla rápida (por
+                    # ecualizador) en ese punto, antes que esperar al final de la canción
+                    falta = entrar_s - tramo_a["pos"] / SR
+                    if falta < self._tiempo_preparar + 5.0:
+                        ligero = True
                 if ligero:
+                    pesos = dict(pesos or {})
                     pesos = {r: (pesos.get(r, 0.5) if r in dj_motor.RECETAS_LIGERAS else 0.0)
                              for r in dj_motor.SINCRONIZADAS}
                 plan = dj_motor.planear(fin_a, ini_b, self._rng, pesos, beats=beats, salir_s=salir_s,
@@ -774,7 +811,7 @@ class SesionDJ:
                 plan["regiones_b"] = self._anticipado.get(cancion_b["ruta"], {}).get("regiones")
                 sin_anticipar = not plan["regiones_a"] or not plan["regiones_b"]
                 # una elección del DJ (copiloto) interrumpe la preparación automática
-                interrumpir = (lambda: parar.is_set()) if elegida is not None else                     (lambda: parar.is_set() or self._pedido is not None)
+                interrumpir = (lambda: parar.is_set() or self._ya is not None) if elegida is not None else                     (lambda: parar.is_set() or self._pedido is not None or self._ya is not None)
                 resultado = dj_motor.preparar(audio_a, fin_a, audio_b, ini_b, plan, cancelado=interrumpir)
                 if resultado is None:
                     return None
@@ -800,6 +837,9 @@ class SesionDJ:
                             "registro": registro, "receta": nombre}
             tramo_b = self._tramo_cancion(indice_b, audio_b, desde=resultado["b_continua"])
             tramo_b["analisis"] = ana_b
+            if self._ya is not None:  # mientras tanto el DJ apretó «Mezclar ya»: no se pisa
+                self._sonadas.discard(indice_b)
+                return None
             with self._candado:
                 a_tiempo = bool(self._tramos) and self._tramos[0] is tramo_a and tramo_a["pos"] < plan["a0"] - SR // 2
                 if a_tiempo:
@@ -871,6 +911,66 @@ class SesionDJ:
     @staticmethod
     def parar_preescucha():
         sd.stop()  # detiene solo la pre-escucha: la salida del público es otro stream
+
+    def mezclar_ahora(self, indice_b=None):
+        """«Mezclar ya»: la transición empieza en el próximo «uno» de compás (unos segundos), con
+        la canción elegida, la que ya estaba lista o la primera recomendada. Usa lo que ya está
+        separado por adelantado; si no hay, cambia el bajo por ecualizador (instantáneo).
+        Devuelve el título de la que entra, o None si no se pudo."""
+        with self._candado:
+            if not self._tramos or self._tramos[0]["tipo"] != "cancion":
+                return None
+            tramo_a = self._tramos[0]
+            en_cola = next((t for t in self._tramos[1:] if t["tipo"] == "cancion"), None)
+        indice_a, ana_a = tramo_a["indice"], tramo_a.get("analisis")
+        if ana_a is None:
+            return None
+        if indice_b is None:
+            indice_b = en_cola["indice"] if en_cola else next((r["indice"] for r in self.recomendar(1)), None)
+        if indice_b is None:
+            return None
+        audio_a = tramo_a["audio"]
+        audio_b, ana_b = self._cargar(indice_b)
+        ahora = tramo_a["pos"] / SR
+        try:  # el juez elige la lectura del ritmo de B que calza con A (doble, mitad, 3:2...)
+            la, opciones = dj_juez.candidatos(audio_a, ana_a, audio_b, ana_b, self.biblioteca[indice_a],
+                                              self.biblioteca[indice_b], salir_s=ahora + 40.0)
+            lb, _nota = dj_juez.elegir(la, opciones)
+        except Exception:  # noqa: BLE001
+            la, lb = ana_a, ana_b
+        entrar = tramo_a["pos"] / SR + 1.5  # lo que tarda en armarse: entra en el compás siguiente
+        plan = dj_motor.planear(la, lb, self._rng, {"sin_bateria": 0, "voz_sobre_ritmo": 0, "eco": 0.2},
+                                entrar_s=entrar, al_compas=True)
+        regiones_a = self._anticipado.get(self.biblioteca[indice_a]["ruta"], {}).get("regiones")
+        regiones_b = self._anticipado.get(self.biblioteca[indice_b]["ruta"], {}).get("regiones")
+        plan["regiones_a"], plan["regiones_b"] = regiones_a, regiones_b
+        plan["ligero"] = not (dj_motor._de_regiones(regiones_a, max(0, plan["a0"] - SR), plan["a1"] + SR)
+                              and regiones_b)
+        resultado = dj_motor.preparar(audio_a, la, audio_b, lb, plan)
+        cancion_b = self.biblioteca[indice_b]
+        a = self.biblioteca[indice_a]
+        registro = {"fecha": time.strftime("%Y-%m-%d %H:%M:%S"), "a": a["titulo"], "b": cancion_b["titulo"],
+                    "receta": plan["receta"], "sincronizada": plan["sincronizada"], "beats": plan["beats"],
+                    "ya": True}
+        nombre = dj_motor.RECETAS[plan["receta"]]["nombre"]
+        tramo_mezcla = {"tipo": "mezcla", "indice": indice_b, "titulo": f"{a['titulo']}  →  {cancion_b['titulo']}",
+                        "audio": resultado["mezcla"], "pos": 0, "fin": len(resultado["mezcla"]),
+                        "registro": registro, "receta": nombre}
+        tramo_b = self._tramo_cancion(indice_b, audio_b, desde=resultado["b_continua"])
+        tramo_b["analisis"] = ana_b
+        with self._candado:
+            if not self._tramos or self._tramos[0] is not tramo_a or tramo_a["pos"] >= plan["a0"]:
+                return None  # la canción ya pasó ese compás (raro): no se toca nada
+            tramo_a["fin"] = plan["a0"]
+            self._tramos = [tramo_a, tramo_mezcla, tramo_b]
+        if en_cola is not None and en_cola["indice"] != indice_b:
+            self._sonadas.discard(en_cola["indice"])
+        self._sonadas.add(indice_b)
+        self._ya = tramo_b  # el bucle principal sigue desde esta
+        self.siguiente = cancion_b["titulo"]
+        self.mensaje = f"Cambiando ya: «{nombre}» en {plan['a0'] / SR - ahora:.0f} s"
+        self._al_evento("estado", "")
+        return cancion_b["titulo"]
 
     def mezclar_ya(self):
         """Salta a 5 s antes de la mezcla, si ya está lista."""

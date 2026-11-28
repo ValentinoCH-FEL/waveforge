@@ -218,7 +218,8 @@ class PestanaDJ(ttk.Frame):
         controles = tk.Frame(caja, bg=tema.FONDO)
         controles.pack(fill="x", pady=(14, 0))
         self.boton_mezclar = BotonAnimado(controles, "⏭  Mezclar ya", self._mezclar_ya, alto=32,
-                                          ayuda="Salta a 5 segundos antes de la mezcla (cuando ya está lista)")
+                                          ayuda="La mezcla empieza en el próximo compás, con la elegida\n"
+                                                "(o la que el DJ tenía lista)")
         self.boton_mezclar.pack(side="left")
         BotonAnimado(controles, "■  Detener", self._detener, alto=32).pack(side="left", padx=8)
         self.boton_preescucha = BotonAnimado(controles, "🎧  Escuchar la mezcla", self._preescuchar, alto=32,
@@ -567,8 +568,26 @@ class PestanaDJ(ttk.Frame):
         self.sesion.detener()
 
     def _mezclar_ya(self):
-        if not self.sesion.mezclar_ya():
-            self.etiqueta_voto.config(text="La mezcla todavía no está lista.")
+        if not self.sesion.activa:
+            return
+        self._mezclando = True
+        self.boton_mezclar.habilitar(False)
+        self.etiqueta_voto.config(text="Cambiando en el próximo compás…")
+        elegida = self._elegida
+
+        def trabajo():
+            try:
+                titulo = self.sesion.mezclar_ahora(elegida)
+            except Exception as error:  # noqa: BLE001
+                titulo, elegida_error = None, str(error)
+            else:
+                elegida_error = None
+            # la pantalla lo muestra en su próximo refresco (Tkinter no se toca desde otro hilo)
+            self._resultado_ya = (f"⏭ Entra «{titulo}»" if titulo else
+                                  f"No se pudo mezclar ahora{': ' + elegida_error if elegida_error else ''}.")
+            self._mezclando = False
+
+        threading.Thread(target=trabajo, daemon=True).start()
 
     def _votar(self, voto):
         cual = self.sesion.calificar(voto)
@@ -631,7 +650,7 @@ class PestanaDJ(ttk.Frame):
                 fila = self._filas.get(e["indice"])
                 if fila and self.tabla.exists(fila):
                     self.tabla.see(fila)
-            self.boton_mezclar.habilitar(bool(e["mezcla_lista"]))
+            self.boton_mezclar.habilitar(not getattr(self, "_mezclando", False))
             self.boton_preescucha.habilitar(bool(e["mezcla_lista"]) and self.sesion.salida_auriculares is not None)
         else:
             self.boton_preescucha.habilitar(False)
@@ -647,6 +666,9 @@ class PestanaDJ(ttk.Frame):
         self.etiqueta_mensaje.config(text=e.get("mensaje") or "")
         self.boton_bien.habilitar(bool(e.get("puede_votar")))
         self.boton_mal.habilitar(bool(e.get("puede_votar")))
+        resultado, self._resultado_ya = getattr(self, "_resultado_ya", None), None
+        if resultado:
+            self.etiqueta_voto.config(text=resultado)
         self._cuadros = getattr(self, "_cuadros", 0) + 1
         if self._cuadros % 10 == 1:  # una vez por segundo: tabla, preparación y ¿ya puede empezar?
             self._actualizar_biblioteca()
