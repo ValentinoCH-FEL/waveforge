@@ -262,14 +262,30 @@ def _leer_cache():
     return _cache
 
 
+_candado_guardar = __import__("threading").Lock()
+
+
 def guardar_cache():
+    """Guarda la biblioteca analizada. Un hilo a la vez (en Windows, dos escrituras del mismo
+    archivo chocan), cada proceso con su temporal, y si el antivirus o el indexador tienen el
+    archivo abierto un instante, se reintenta."""
     if _cache is None:
         return
-    os.makedirs(CARPETA_DATOS, exist_ok=True)
-    temporal = _RUTA_CACHE + ".tmp"
-    with open(temporal, "w", encoding="utf-8") as f:
-        json.dump(_cache, f)
-    os.replace(temporal, _RUTA_CACHE)
+    with _candado_guardar:
+        os.makedirs(CARPETA_DATOS, exist_ok=True)
+        temporal = f"{_RUTA_CACHE}.{os.getpid()}.tmp"
+        with open(temporal, "w", encoding="utf-8") as f:
+            json.dump(dict(_cache), f)
+        for intento in range(5):
+            try:
+                os.replace(temporal, _RUTA_CACHE)
+                return
+            except PermissionError:
+                time.sleep(0.2 * (intento + 1))
+        try:
+            os.remove(temporal)
+        except OSError:
+            pass
 
 
 def _clave(ruta):
