@@ -58,44 +58,56 @@ class PestanaDJ(ttk.Frame):
     # ---------- interfaz ----------
 
     def _construir(self):
-        cabecera = ttk.Frame(self)
-        cabecera.pack(fill="x", padx=20, pady=(16, 8))
-        ttk.Label(cabecera, text="Modo DJ", style="Titulo.TLabel").pack(side="left")
-        ttk.Label(cabecera, foreground=tema.TEXTO_SUAVE,
-                  text="   Elige una carpeta o un USB con música: el DJ elige la siguiente canción y arma cada "
-                       "mezcla con sus pistas.").pack(side="left")
-
         cuerpo = ttk.Frame(self)
-        cuerpo.pack(fill="both", expand=True, padx=20, pady=(0, 16))
+        cuerpo.pack(fill="both", expand=True, padx=20, pady=16)
 
-        # --- biblioteca ---
-        izquierda = ttk.LabelFrame(cuerpo, text="Biblioteca")
+        # ================= izquierda: la música =================
+        izquierda = ttk.Frame(cuerpo)
         izquierda.pack(side="left", fill="both", expand=True, padx=(0, 14))
-        barra = ttk.Frame(izquierda)
-        barra.pack(fill="x", padx=10, pady=(10, 6))
-        BotonAnimado(barra, "📂  Elegir carpeta o USB...", self._elegir_carpeta, estilo="acento", alto=32,
-                     ayuda="Una carpeta de tu PC o la unidad de un USB con música").pack(side="left")
-        self.etiqueta_biblioteca = ttk.Label(barra, text="Todavía no elegiste ninguna carpeta.",
-                                             foreground=tema.TEXTO_SUAVE)
-        self.etiqueta_biblioteca.pack(side="left", padx=12)
-        self.boton_usb = BotonAnimado(barra, "🔌  Usar USB", self._usar_usb, alto=32,
-                                      ayuda="Cargar la música del USB conectado")
-        self._unidad_usb = None
 
-        # --- lo simple: elegir el género y que suene ---
-        fiesta = ttk.LabelFrame(izquierda, text="¿Qué quieres escuchar?")
-        fiesta.pack(fill="x", padx=10, pady=(0, 8))
-        self.fila_generos = tk.Frame(fiesta, bg=tema.FONDO)
-        self.fila_generos.pack(fill="x", padx=8, pady=(8, 4))
-        self.etiqueta_preparacion = ttk.Label(fiesta, text="Conecta un USB con música (o elige una carpeta).",
+        estado = ttk.Frame(izquierda)
+        estado.pack(fill="x", pady=(0, 8))
+        ttk.Label(estado, text="Modo DJ", style="Titulo.TLabel").pack(side="left")
+        self.etiqueta_preparacion = ttk.Label(estado, text="   Conecta un USB con música: se prepara solo.",
                                               foreground=tema.TEXTO_SUAVE)
-        self.etiqueta_preparacion.pack(anchor="w", padx=8, pady=(0, 8))
+        self.etiqueta_preparacion.pack(side="left")
+        BotonAnimado(estado, "📂  Cambiar música…", self._elegir_carpeta, alto=28, estilo="suave",
+                     ayuda="Otra carpeta de tu PC u otro USB").pack(side="right")
+        self._unidad_usb = None
         self._fiesta_pendiente = None   # género elegido que espera tener canciones listas para empezar
         self._valores_mostrados = {}    # índice -> valores que muestra la tabla (para no redibujar de más)
 
-        # --- plan de la sesión: qué géneros, cuánto tiempo y en qué orden ---
-        plan = ttk.LabelFrame(izquierda, text="Plan de la sesión")
-        plan.pack(fill="x", padx=10, pady=(0, 8))
+        fiesta = ttk.LabelFrame(izquierda, text="¿Qué quieres escuchar?")
+        fiesta.pack(fill="x", pady=(0, 8))
+        self.fila_generos = tk.Frame(fiesta, bg=tema.FONDO)
+        self.fila_generos.pack(fill="x", padx=8, pady=8)
+
+        marco_tabla = ttk.Frame(izquierda)
+        marco_tabla.pack(fill="both", expand=True)
+        self.tabla = ttk.Treeview(marco_tabla, columns=("titulo", "artista", "genero", "bpm", "tono"),
+                                  show="headings", selectmode="browse")
+        for columna, texto, ancho, ancla in (("titulo", "Canción", 250, "w"), ("artista", "Artista", 150, "w"),
+                                             ("genero", "Género", 110, "w"), ("bpm", "BPM", 50, "e"),
+                                             ("tono", "Tono", 80, "center")):
+            self.tabla.heading(columna, text=texto)
+            self.tabla.column(columna, width=ancho, anchor=ancla, stretch=columna == "titulo")
+        desliz = ttk.Scrollbar(marco_tabla, orient="vertical", command=self.tabla.yview)
+        self.tabla.configure(yscrollcommand=desliz.set)
+        desliz.pack(side="right", fill="y")
+        self.tabla.pack(side="left", fill="both", expand=True)
+        self.tabla.tag_configure("sonando", foreground=tema.AZUL)
+        self.tabla.tag_configure("error", foreground=tema.ERROR)
+        # doble clic: si ya suena algo, «que siga esta»; si no, empezar por ella
+        self.tabla.bind("<Double-Button-1>", lambda e: self._doble_clic_tabla())
+
+        # --- opciones avanzadas (plegadas): plan por géneros, mismo artista, estilo de un DJ ---
+        self._avanzado_abierto = False
+        self.boton_avanzado = ttk.Button(izquierda, text="⚙  Opciones avanzadas  ▸",
+                                         command=self._alternar_avanzado)
+        self.boton_avanzado.pack(anchor="w", pady=(8, 0))
+        self.marco_avanzado = ttk.Frame(izquierda)
+        plan = ttk.LabelFrame(self.marco_avanzado, text="Plan de la sesión")
+        plan.pack(fill="x", pady=(4, 6))
         fila = ttk.Frame(plan)
         fila.pack(fill="x", padx=8, pady=(8, 4))
         ttk.Label(fila, text="Género:").pack(side="left")
@@ -121,39 +133,45 @@ class PestanaDJ(ttk.Frame):
         self._plan_inicial = True   # el plan todavía es el de fábrica (solo "Variado")
         self._mostrar_plan()
 
-        marco_tabla = ttk.Frame(izquierda)
-        marco_tabla.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        self.tabla = ttk.Treeview(marco_tabla, columns=("titulo", "artista", "genero", "bpm", "tono"),
-                                  show="headings", selectmode="browse")
-        for columna, texto, ancho, ancla in (("titulo", "Canción", 250, "w"), ("artista", "Artista", 150, "w"),
-                                             ("genero", "Género", 110, "w"), ("bpm", "BPM", 50, "e"),
-                                             ("tono", "Tono", 80, "center")):
-            self.tabla.heading(columna, text=texto)
-            self.tabla.column(columna, width=ancho, anchor=ancla, stretch=columna == "titulo")
-        desliz = ttk.Scrollbar(marco_tabla, orient="vertical", command=self.tabla.yview)
-        self.tabla.configure(yscrollcommand=desliz.set)
-        desliz.pack(side="right", fill="y")
-        self.tabla.pack(side="left", fill="both", expand=True)
-        self.tabla.tag_configure("sonando", foreground=tema.AZUL)
-        self.tabla.tag_configure("error", foreground=tema.ERROR)
-        self.tabla.bind("<Double-Button-1>", lambda e: self._empezar(desde_seleccion=True))
+        estilo = ttk.LabelFrame(self.marco_avanzado, text="Estilo aprendido de un DJ")
+        estilo.pack(fill="x")
+        fila_estilo = ttk.Frame(estilo)
+        fila_estilo.pack(fill="x", padx=8, pady=8)
+        self.boton_aprender = BotonAnimado(fila_estilo, "🎓  Aprender de una mezcla…", self._aprender, alto=28,
+                                           ayuda="Elige el audio (MP3, WAV...) o el video de un DJ mezclando.\n"
+                                                 "Se analiza cada cuánto cambia de canción, cuánto duran sus\n"
+                                                 "transiciones y qué técnica usa.")
+        self.boton_aprender.pack(side="left")
+        self.var_estilo = tk.BooleanVar(value=False)
+        self.check_estilo = ttk.Checkbutton(fila_estilo, text="Mezclar con este estilo", variable=self.var_estilo,
+                                            command=self._aplicar_estilo)
+        self.check_estilo.pack(side="left", padx=12)
+        self.etiqueta_estilo = ttk.Label(estilo, text="", foreground=tema.TEXTO_SUAVE, wraplength=640,
+                                         justify="left")
+        self.etiqueta_estilo.pack(anchor="w", padx=8, pady=(0, 8))
+        self._perfil = None
+        guardados = dj_aprender.cargar_todos()
+        self._mostrar_perfil(guardados[0] if guardados else None)
 
-        # --- cabina ---
+        # ================= derecha: la cabina con el copiloto =================
         derecha = ttk.LabelFrame(cuerpo, text="Cabina")
         derecha.pack(side="left", fill="y")
-        caja = tk.Frame(derecha, bg=tema.FONDO, width=430)
+        caja = tk.Frame(derecha, bg=tema.FONDO, width=460)
         caja.pack(fill="both", expand=True, padx=14, pady=12)
         caja.pack_propagate(False)
 
-        tk.Label(caja, text="AHORA SUENA", bg=tema.FONDO, fg=tema.TEXTO_SUAVE,
-                 font=("TkDefaultFont", 8, "bold")).pack(anchor="w")
+        def titulo(texto, arriba=16):
+            tk.Label(caja, text=texto, bg=tema.FONDO, fg=tema.TEXTO_SUAVE,
+                     font=("TkDefaultFont", 8, "bold")).pack(anchor="w", pady=(arriba, 2))
+
+        titulo("AHORA SUENA", 0)
         self.etiqueta_titulo = tk.Label(caja, text="—", bg=tema.FONDO, fg=tema.TEXTO, anchor="w", justify="left",
-                                        wraplength=400, font=("TkDefaultFont", 13, "bold"))
-        self.etiqueta_titulo.pack(fill="x", pady=(2, 2))
+                                        wraplength=430, font=("TkDefaultFont", 13, "bold"))
+        self.etiqueta_titulo.pack(fill="x")
         self.etiqueta_detalle = tk.Label(caja, text="", bg=tema.FONDO, fg=tema.AZUL, anchor="w")
         self.etiqueta_detalle.pack(fill="x")
         self.progreso = ttk.Progressbar(caja, mode="determinate", maximum=1000)
-        self.progreso.pack(fill="x", pady=(10, 2))
+        self.progreso.pack(fill="x", pady=(8, 2))
         fila_tiempo = tk.Frame(caja, bg=tema.FONDO)
         fila_tiempo.pack(fill="x")
         self.etiqueta_tiempo = tk.Label(fila_tiempo, text="", bg=tema.FONDO, fg=tema.TEXTO_SUAVE, font=("Consolas", 10))
@@ -161,65 +179,125 @@ class PestanaDJ(ttk.Frame):
         self.medidor = MedidorVolumen(fila_tiempo, ancho=150, alto=18)
         self.medidor.pack(side="right")
 
-        tk.Label(caja, text="SIGUIENTE", bg=tema.FONDO, fg=tema.TEXTO_SUAVE,
-                 font=("TkDefaultFont", 8, "bold")).pack(anchor="w", pady=(18, 0))
+        titulo("SIGUIENTE")
         self.etiqueta_siguiente = tk.Label(caja, text="—", bg=tema.FONDO, fg=tema.TEXTO, anchor="w", justify="left",
-                                           wraplength=400, font=("TkDefaultFont", 10, "bold"))
-        self.etiqueta_siguiente.pack(fill="x", pady=(2, 2))
+                                           wraplength=430, font=("TkDefaultFont", 10, "bold"))
+        self.etiqueta_siguiente.pack(fill="x")
         self.etiqueta_mensaje = tk.Label(caja, text="", bg=tema.FONDO, fg=tema.TEXTO_SUAVE, anchor="w",
-                                         justify="left", wraplength=400)
+                                         justify="left", wraplength=430)
         self.etiqueta_mensaje.pack(fill="x")
 
-        controles = tk.Frame(caja, bg=tema.FONDO)
-        controles.pack(fill="x", pady=(18, 0))
-        self.boton_empezar = BotonAnimado(controles, "▶  Empezar", self._empezar, estilo="acento", alto=34,
-                                          ayuda="Empieza por la canción elegida en la lista (o por una al azar)")
-        self.boton_empezar.pack(side="left")
-        self.boton_mezclar = BotonAnimado(controles, "⏭  Mezclar ya", self._mezclar_ya, alto=34,
-                                          ayuda="Salta a 5 segundos antes de la mezcla (cuando ya está lista)")
-        self.boton_mezclar.pack(side="left", padx=8)
-        BotonAnimado(controles, "■  Detener", self._detener, alto=34).pack(side="left")
+        titulo("RECOMENDADAS PARA SEGUIR  ·  un clic la elige")
+        self.marco_recos = tk.Frame(caja, bg=tema.FONDO)
+        self.marco_recos.pack(fill="x")
+        titulo("¿DÓNDE CAMBIAR?  ·  desde donde va la canción")
+        self.marco_puntos = tk.Frame(caja, bg=tema.FONDO)
+        self.marco_puntos.pack(fill="x")
+        self._recos_mostradas = None
+        self._puntos_mostrados = None
+        self._elegida = None
 
-        tk.Label(caja, text="¿QUÉ TAL LA ÚLTIMA MEZCLA?", bg=tema.FONDO, fg=tema.TEXTO_SUAVE,
-                 font=("TkDefaultFont", 8, "bold")).pack(anchor="w", pady=(22, 4))
+        controles = tk.Frame(caja, bg=tema.FONDO)
+        controles.pack(fill="x", pady=(14, 0))
+        self.boton_mezclar = BotonAnimado(controles, "⏭  Mezclar ya", self._mezclar_ya, alto=32,
+                                          ayuda="Salta a 5 segundos antes de la mezcla (cuando ya está lista)")
+        self.boton_mezclar.pack(side="left")
+        BotonAnimado(controles, "■  Detener", self._detener, alto=32).pack(side="left", padx=8)
+
+        titulo("¿QUÉ TAL LA ÚLTIMA MEZCLA?")
         votos = tk.Frame(caja, bg=tema.FONDO)
         votos.pack(fill="x")
-        self.boton_bien = BotonAnimado(votos, "👍  Me gustó", lambda: self._votar(1), alto=34,
-                                       ayuda="El DJ usará más seguido este tipo de mezcla")
+        self.boton_bien = BotonAnimado(votos, "👍  Me gustó", lambda: self._votar(1), alto=30,
+                                       ayuda="El DJ aprende tu gusto (cada 10 votos se reentrena)")
         self.boton_bien.pack(side="left")
-        self.boton_mal = BotonAnimado(votos, "👎  No me gustó", lambda: self._votar(-1), alto=34, estilo="peligro",
-                                      ayuda="El DJ usará menos este tipo de mezcla")
+        self.boton_mal = BotonAnimado(votos, "👎  No me gustó", lambda: self._votar(-1), alto=30, estilo="peligro",
+                                      ayuda="El DJ aprende tu gusto (cada 10 votos se reentrena)")
         self.boton_mal.pack(side="left", padx=8)
         self.etiqueta_voto = tk.Label(caja, text="", bg=tema.FONDO, fg=tema.TEXTO_SUAVE, anchor="w", justify="left",
-                                      wraplength=400)
-        self.etiqueta_voto.pack(fill="x", pady=(6, 0))
+                                      wraplength=430)
+        self.etiqueta_voto.pack(fill="x", pady=(4, 0))
 
-        # --- aprender el estilo de un DJ a partir de una de sus mezclas ---
-        tk.Label(caja, text="ESTILO APRENDIDO DE UN DJ", bg=tema.FONDO, fg=tema.TEXTO_SUAVE,
-                 font=("TkDefaultFont", 8, "bold")).pack(anchor="w", pady=(18, 4))
-        fila_estilo = tk.Frame(caja, bg=tema.FONDO)
-        fila_estilo.pack(fill="x")
-        self.boton_aprender = BotonAnimado(fila_estilo, "🎓  Aprender de una mezcla...", self._aprender, alto=32,
-                                           ayuda="Elige el audio (MP3, WAV...) o el video de un DJ mezclando.\n"
-                                                 "Se analiza cada cuánto cambia de canción, cuánto duran sus\n"
-                                                 "transiciones y qué técnica usa.")
-        self.boton_aprender.pack(side="left")
-        self.var_estilo = tk.BooleanVar(value=False)
-        self.check_estilo = ttk.Checkbutton(caja, text="Mezclar con este estilo", variable=self.var_estilo,
-                                            command=self._aplicar_estilo)
-        self.check_estilo.pack(anchor="w", pady=(6, 0))
-        self.etiqueta_estilo = tk.Label(caja, text="", bg=tema.FONDO, fg=tema.TEXTO_SUAVE, anchor="w",
-                                        justify="left", wraplength=400, font=("TkDefaultFont", 8))
-        self.etiqueta_estilo.pack(fill="x")
-        self._perfil = None
-        guardados = dj_aprender.cargar_todos()
-        self._mostrar_perfil(guardados[0] if guardados else None)
+    def _alternar_avanzado(self):
+        self._avanzado_abierto = not self._avanzado_abierto
+        if self._avanzado_abierto:
+            self.marco_avanzado.pack(fill="x", after=self.boton_avanzado)
+            self.boton_avanzado.config(text="⚙  Opciones avanzadas  ▾")
+        else:
+            self.marco_avanzado.pack_forget()
+            self.boton_avanzado.config(text="⚙  Opciones avanzadas  ▸")
 
-        tk.Label(caja, bg=tema.FONDO, fg=tema.TEXTO_SUAVE, anchor="w", justify="left", wraplength=400,
-                 font=("TkDefaultFont", 8),
-                 text="La IA separa solo los segundos de cada mezcla, mientras suena la canción anterior, y cada "
-                      "canción se descarta de la memoria al terminar. Las canciones con tempos a más de ±8 % "
-                      "se unen con un corte con eco.").pack(side="bottom", fill="x")
+    def _doble_clic_tabla(self):
+        elegida = self.tabla.selection()
+        indice = next((i for i, fila in self._filas.items() if elegida and fila == elegida[0]), None)
+        if indice is None:
+            return
+        if self.sesion.activa:
+            self._elegir_siguiente(indice)
+        else:
+            self._empezar(desde_seleccion=True)
+
+    # ---------- copiloto ----------
+
+    def _elegir_siguiente(self, indice):
+        if indice == self._ultimo_indice:
+            return
+        self._elegida = indice
+        self.sesion.pedir(indice=indice)
+        c = self.sesion.biblioteca[indice]
+        self.etiqueta_voto.config(text=f"Preparando la mezcla con «{c['titulo']}»…")
+        self._recos_mostradas = None  # se redibuja con la elegida marcada
+
+    def _cambiar_en(self, segundo):
+        self.sesion.pedir(indice=self._elegida, entrar_s=segundo)
+        self.etiqueta_voto.config(text=f"El cambio se hará en {_tiempo(segundo)} (inicio de frase más cercano).")
+
+    def _limpiar_copiloto(self):
+        for marco in (self.marco_recos, self.marco_puntos):
+            for hijo in marco.winfo_children():
+                hijo.destroy()
+        self._recos_mostradas = self._puntos_mostrados = None
+        self._elegida = None
+
+    def _actualizar_copiloto(self):
+        if not self.sesion.activa:
+            if self._recos_mostradas is not None:
+                self._limpiar_copiloto()
+            return
+        recos = self.sesion.recomendar()
+        clave = [(r["indice"], tuple(r["razones"])) for r in recos] + [self._elegida]
+        if clave != self._recos_mostradas:
+            self._recos_mostradas = clave
+            for hijo in self.marco_recos.winfo_children():
+                hijo.destroy()
+            for r in recos:
+                c = self.sesion.biblioteca[r["indice"]]
+                elegida = r["indice"] == self._elegida
+                fondo = tema.AZUL if elegida else tema.FONDO
+                fila = tk.Frame(self.marco_recos, bg=fondo, cursor="hand2")
+                fila.pack(fill="x", pady=1)
+                nombre = tk.Label(fila, text=f"{c['artista'] or ''} – {c['titulo']}", anchor="w", bg=fondo,
+                                  fg=tema.FONDO if elegida else tema.TEXTO, font=("TkDefaultFont", 9, "bold"))
+                nombre.pack(fill="x", padx=6, pady=(3, 0))
+                razones = tk.Label(fila, text=" · ".join(r["razones"]), anchor="w", justify="left", wraplength=420,
+                                   bg=fondo, fg=tema.FONDO if elegida else tema.TEXTO_SUAVE,
+                                   font=("TkDefaultFont", 8))
+                razones.pack(fill="x", padx=6, pady=(0, 3))
+                for w in (fila, nombre, razones):
+                    w.bind("<Button-1>", lambda e, i=r["indice"]: self._elegir_siguiente(i))
+        puntos = self.sesion.puntos_de_cambio()
+        clave_p = [(int(p["segundo"]), p["motivo"]) for p in puntos]
+        if clave_p != self._puntos_mostrados:
+            self._puntos_mostrados = clave_p
+            for hijo in self.marco_puntos.winfo_children():
+                hijo.destroy()
+            if not puntos:
+                tk.Label(self.marco_puntos, text="Ya no hay tiempo de preparar otro punto: cambia al final.",
+                         bg=tema.FONDO, fg=tema.TEXTO_SUAVE, anchor="w").pack(fill="x")
+            for p in puntos:
+                BotonAnimado(self.marco_puntos, f"{_tiempo(p['segundo'])}  ·  {p['motivo']}",
+                             lambda s=p["segundo"]: self._cambiar_en(s), alto=26, estilo="suave",
+                             ayuda="La mezcla empieza en el inicio de frase más cercano a este punto").pack(
+                    fill="x", pady=1)
 
     # ---------- biblioteca ----------
 
@@ -326,11 +404,11 @@ class PestanaDJ(ttk.Frame):
         equipo = self.sesion.equipo
         modo = "mezclas con IA" if equipo.get("separar_con_ia", True) else "mezclas por ecualizador (equipo modesto)"
         if hechas >= total:
-            texto = f"✔ Tu música está lista: {self.sesion.analizadas()} canciones · {modo}"
+            texto = f"   ✔ Tu música está lista: {self.sesion.analizadas()} canciones · {modo}"
         else:
             falta = self.sesion.segundos_restantes()
             estimado = f" · quedan ~{max(1, round(falta / 60))} min" if falta else ""
-            texto = (f"Preparando tu música… {100 * hechas // total} %{estimado} · "
+            texto = (f"   Preparando tu música… {100 * hechas // total} %{estimado} · "
                      f"{equipo.get('procesos', 1)} procesos en paralelo")
         if self._fiesta_pendiente is not None:
             texto = f"Preparando {self._fiesta_pendiente}: empieza en cuanto haya canciones listas…   " + texto
@@ -399,21 +477,12 @@ class PestanaDJ(ttk.Frame):
     # ---------- USB ----------
 
     def _buscar_usb(self):
-        """Muestra el botón "Usar USB" cuando hay una unidad extraíble conectada."""
+        """Al conectar un USB, si no hay música cargada, se carga y se prepara solo."""
         unidad = unidad_extraible()
         if unidad != self._unidad_usb:
             self._unidad_usb = unidad
-            if unidad:
-                self.boton_usb.cambiar_texto(f"🔌  Usar USB ({unidad[:2]})")
-                self.boton_usb.pack(side="left", padx=(8, 0), before=self.etiqueta_biblioteca)
-                if not self.sesion.biblioteca and not self.sesion.activa:
-                    self.abrir_carpeta(unidad)  # se prepara solo: el usuario no tiene que hacer nada
-            else:
-                self.boton_usb.pack_forget()
-
-    def _usar_usb(self):
-        if self._unidad_usb:
-            self.abrir_carpeta(self._unidad_usb)
+            if unidad and not self.sesion.biblioteca and not self.sesion.activa:
+                self.abrir_carpeta(unidad)  # el usuario no tiene que hacer nada
 
     def _actualizar_biblioteca(self):
         biblioteca = self.sesion.biblioteca
@@ -426,11 +495,6 @@ class PestanaDJ(ttk.Frame):
             if self._valores_mostrados.get(i) != clave and self.tabla.exists(fila):
                 self.tabla.item(fila, values=clave[0], tags=etiquetas)
                 self._valores_mostrados[i] = clave
-        if biblioteca:
-            hechas = self.sesion.preparadas()  # cuenta también las dañadas que se descartaron
-            texto = (f"{len(biblioteca)} canciones" if hechas >= len(biblioteca)
-                     else f"{len(biblioteca)} canciones · analizando {hechas} de {len(biblioteca)}...")
-            self.etiqueta_biblioteca.config(text=texto)
 
     # ---------- controles ----------
 
@@ -474,6 +538,12 @@ class PestanaDJ(ttk.Frame):
     # ---------- avisos desde los hilos de fondo ----------
 
     def _evento_de_fondo(self, tipo, texto):
+        if tipo == "recomendaciones":  # empezó otra canción: el copiloto recomienda de nuevo
+            try:
+                self.after(0, self._limpiar_copiloto)
+                self.after(50, self._actualizar_copiloto)
+            except RuntimeError:
+                pass
         if tipo in ("error", "aviso"):
             try:
                 self.after(0, lambda: self._mostrar_aviso(tipo, texto))
@@ -533,6 +603,8 @@ class PestanaDJ(ttk.Frame):
             self._actualizar_biblioteca()
             self._mostrar_preparacion()
             self._intentar_fiesta()
+        if self._cuadros % 20 == 5:  # cada 2 s: recomendaciones y puntos de cambio al día
+            self._actualizar_copiloto()
         if self._cuadros % 30 == 1:  # cada 3 s: ¿se conectó o se sacó un USB?
             self._buscar_usb()
         self.after(MS_CUADRO, self._tick)

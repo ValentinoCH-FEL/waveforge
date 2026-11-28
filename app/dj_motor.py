@@ -225,6 +225,14 @@ def _limitar(x):
     return np.where(a > 0.8, np.sign(x) * (0.8 + 0.2 * np.tanh((a - 0.8) / 0.2)), x).astype(np.float32)
 
 
+def _de_regiones(regiones, desde, hasta):
+    """Pistas ya separadas que cubren [desde, hasta) (muestras), o None."""
+    for r0, r1, stems in regiones or []:
+        if r0 <= desde and hasta <= r1:
+            return {s: v[desde - r0:hasta - r0] for s, v in stems.items()}
+    return None
+
+
 def _energia_por_beat(pista, beats_rel):
     """Energía (RMS) de una pista en cada beat de la transición."""
     bordes = np.clip(np.round(beats_rel).astype(int), 0, len(pista))
@@ -284,10 +292,11 @@ def preparar(audio_a, ana_a, audio_b, ana_b, plan, cancelado=None):
     b_hasta = min(len(audio_b), int(fin_b) + _MARGEN)
     a_desde, a_hasta = max(0, a0 - _MARGEN), min(len(audio_a), a1 + _MARGEN)
     ligero = plan.get("ligero", False)
-    stems_a = separar_tramo(audio_a[a_desde:a_hasta], ligero)
+    # lo que el copiloto ya separó por adelantado (regiones de cada canción) se reutiliza
+    stems_a = _de_regiones(plan.get("regiones_a"), a_desde, a_hasta) or separar_tramo(audio_a[a_desde:a_hasta], ligero)
     if cancelado and cancelado():
         return None
-    stems_b = separar_tramo(audio_b[b_desde:b_hasta], ligero)
+    stems_b = _de_regiones(plan.get("regiones_b"), b_desde, b_hasta) or separar_tramo(audio_b[b_desde:b_hasta], ligero)
     if cancelado and cancelado():
         return None
 
