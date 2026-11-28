@@ -138,7 +138,11 @@ def nota(caracteristicas):
     if modelo is None:
         return None
     x = np.array([[caracteristicas.get(c, 1.0) for c in CARACTERISTICAS]], dtype=float)
-    return float(np.exp(modelo.predict(x)[0]))
+    # Un solo hilo: scikit-learn y PyTorch (Demucs) traen cada uno su OpenMP, y en Windows
+    # pueden trabarse girando si los dos abren hilos en el mismo proceso. El modelo es chico.
+    from threadpoolctl import threadpool_limits
+    with threadpool_limits(limits=1):
+        return float(np.exp(modelo.predict(x)[0]))
 
 
 def elegir(local_a, opciones):
